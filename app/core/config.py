@@ -1,4 +1,5 @@
 from functools import lru_cache
+import json
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -80,7 +81,17 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> list[str]:
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+        raw_origins = self.CORS_ORIGINS.strip()
+        if raw_origins.startswith("["):
+            origins = json.loads(raw_origins)
+        else:
+            origins = raw_origins.split(",")
+
+        return [
+            str(origin).strip().rstrip("/")
+            for origin in origins
+            if str(origin).strip()
+        ]
 
     @property
     def cors_allow_credentials(self) -> bool:
