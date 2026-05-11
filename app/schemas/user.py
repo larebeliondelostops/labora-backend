@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class UserCreate(BaseModel):
@@ -14,3 +14,17 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+
+
+class CurrentUser(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    email: EmailStr
+    first_name: str | None = Field(alias="firstName")
+    last_name: str | None = Field(alias="lastName")
+    full_name: str | None = Field(alias="fullName")
+    avatar_url: str | None = Field(alias="avatarUrl")
+    role: str
+    is_active: bool = Field(alias="isActive")
+    is_verified: bool = Field(alias="isVerified")

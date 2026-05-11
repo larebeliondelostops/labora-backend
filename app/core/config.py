@@ -12,11 +12,29 @@ class Settings(BaseSettings):
 
     JWT_SECRET_KEY: str = "change-this-secret-before-production"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 120
 
     DATABASE_URL: str
 
     CORS_ORIGINS: str = "http://localhost:3000"
+    CORS_ALLOW_CREDENTIALS: bool = True
+
+    FRONTEND_URL: str = "http://localhost:3000"
+
+    AUTH_COOKIE_NAME: str = "labora_access_token"
+    AUTH_COOKIE_SECURE: bool = False
+    AUTH_COOKIE_HTTPONLY: bool = True
+    AUTH_COOKIE_SAMESITE: str = "lax"
+    AUTH_COOKIE_DOMAIN: str = ""
+
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
+    GOOGLE_OAUTH_CLIENT_SECRET: str = ""
+    GOOGLE_OAUTH_REDIRECT_URI: str = (
+        "http://localhost:8000/api/v1/auth/google/callback"
+    )
+    GOOGLE_OAUTH_SCOPES: str = "openid email profile"
+
+    OAUTH_STATE_EXPIRE_MINUTES: int = 10
 
     LOCAL_STORAGE_PATH: str = "/app/storage"
     MAX_UPLOAD_SIZE_MB: int = 25
@@ -63,6 +81,54 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    @property
+    def cors_allow_credentials(self) -> bool:
+        return self.CORS_ALLOW_CREDENTIALS
+
+    @property
+    def frontend_url(self) -> str:
+        return self.FRONTEND_URL.rstrip("/")
+
+    @property
+    def auth_cookie_name(self) -> str:
+        return self.AUTH_COOKIE_NAME
+
+    @property
+    def auth_cookie_secure(self) -> bool:
+        return self.AUTH_COOKIE_SECURE
+
+    @property
+    def auth_cookie_httponly(self) -> bool:
+        return self.AUTH_COOKIE_HTTPONLY
+
+    @property
+    def auth_cookie_samesite(self) -> str:
+        return self.AUTH_COOKIE_SAMESITE
+
+    @property
+    def auth_cookie_domain(self) -> str | None:
+        return self.AUTH_COOKIE_DOMAIN or None
+
+    @property
+    def google_oauth_client_id(self) -> str:
+        return self.GOOGLE_OAUTH_CLIENT_ID
+
+    @property
+    def google_oauth_client_secret(self) -> str:
+        return self.GOOGLE_OAUTH_CLIENT_SECRET
+
+    @property
+    def google_oauth_redirect_uri(self) -> str:
+        return self.GOOGLE_OAUTH_REDIRECT_URI
+
+    @property
+    def google_oauth_scopes(self) -> str:
+        return self.GOOGLE_OAUTH_SCOPES
+
+    @property
+    def oauth_state_expire_minutes(self) -> int:
+        return self.OAUTH_STATE_EXPIRE_MINUTES
 
     @property
     def local_storage_path(self) -> str:

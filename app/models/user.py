@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, String
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
@@ -34,6 +34,14 @@ class User(Base):
         String(120),
         nullable=True,
     )
+    full_name: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    avatar_url: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
     role: Mapped[str] = mapped_column(
         String(50),
         default="user",
@@ -59,4 +67,9 @@ class User(Base):
         default=datetime.utcnow,
         onupdate=datetime.utcnow,
         nullable=False,
+    )
+
+    external_auth_accounts: Mapped[list["ExternalAuthAccount"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
     )
