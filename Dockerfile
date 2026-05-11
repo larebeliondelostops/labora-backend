@@ -7,11 +7,6 @@ ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y \
     build-essential \
-    poppler-utils \
-    tesseract-ocr \
-    tesseract-ocr-spa \
-    libmagic1 \
-    file \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

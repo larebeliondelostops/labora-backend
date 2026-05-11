@@ -1,2 +1,6 @@
 class LaboraException(Exception):
-    """Base exception for domain-specific errors."""
+    pass
+
+
+class DatabaseConnectionError(LaboraException):
+    pass
