@@ -22,9 +22,9 @@ services:
     container_name: labora-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: labora_db
-      POSTGRES_USER: labora
-      POSTGRES_PASSWORD: labora_password
+      POSTGRES_DB: ${POSTGRES_DB:-labora_db}
+      POSTGRES_USER: ${POSTGRES_USER:-labora}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-labora_password}
     ports:
       - "5432:5432"
     volumes:
