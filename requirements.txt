@@ -4,10 +4,14 @@ uvicorn[standard]
 pydantic
 pydantic-settings
 python-dotenv
+email-validator
 
 sqlalchemy
 psycopg[binary]
 alembic
+python-jose[cryptography]
+passlib[bcrypt]
+bcrypt<4.1
 
 pytest
 httpx

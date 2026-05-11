@@ -10,6 +10,10 @@ class Settings(BaseSettings):
 
     API_V1_PREFIX: str = "/api/v1"
 
+    JWT_SECRET_KEY: str = "change-this-secret-before-production"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+
     DATABASE_URL: str
 
     CORS_ORIGINS: str = "http://localhost:3000"
@@ -39,6 +43,18 @@ class Settings(BaseSettings):
     @property
     def api_v1_prefix(self) -> str:
         return self.API_V1_PREFIX
+
+    @property
+    def jwt_secret_key(self) -> str:
+        return self.JWT_SECRET_KEY
+
+    @property
+    def jwt_algorithm(self) -> str:
+        return self.JWT_ALGORITHM
+
+    @property
+    def access_token_expire_minutes(self) -> int:
+        return self.ACCESS_TOKEN_EXPIRE_MINUTES
 
     @property
     def database_url(self) -> str:
