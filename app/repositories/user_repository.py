@@ -62,21 +62,22 @@ class UserRepository:
             avatar_url=profile.avatar_url,
             role="user",
             is_active=True,
-            is_verified=profile.email_verified,
-            status="active" if profile.email_verified else "pending_verification",
+            is_verified=False,
+            status="pending_verification",
         )
         self.db.add(user)
         self.db.flush()
         return user
 
     def update_from_google_profile(self, user: User, profile: Any) -> User:
-        user.first_name = profile.first_name
-        user.last_name = profile.last_name
-        user.full_name = profile.full_name
-        user.avatar_url = profile.avatar_url
-        user.is_verified = user.is_verified or profile.email_verified
-        if profile.email_verified:
-            user.status = "active"
+        if profile.first_name and not user.first_name:
+            user.first_name = profile.first_name
+        if profile.last_name and not user.last_name:
+            user.last_name = profile.last_name
+        if profile.full_name and not user.full_name:
+            user.full_name = profile.full_name
+        if profile.avatar_url:
+            user.avatar_url = profile.avatar_url
         self.db.flush()
         return user
 
@@ -89,6 +90,10 @@ class UserRepository:
             first_name = user.first_name or ""
             last_name = user.last_name or ""
             user.full_name = f"{first_name} {last_name}".strip() or None
+        if payload.document_type is not None:
+            user.document_type = payload.document_type
+        if payload.document_number is not None:
+            user.document_number = payload.document_number
         if payload.phone is not None:
             user.phone = payload.phone
             user.phone_verified_at = None

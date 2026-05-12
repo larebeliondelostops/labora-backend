@@ -49,7 +49,11 @@ def get_current_user_context(
         )
 
     user = UserRepository(db).get_by_id(payload["sub"])
-    if user is None or not user.is_active or user.status != "active":
+    if (
+        user is None
+        or not user.is_active
+        or user.status in {"blocked", "suspended", "deleted"}
+    ):
         raise ApiError(
             status_code=status.HTTP_401_UNAUTHORIZED,
             code="UNAUTHORIZED",

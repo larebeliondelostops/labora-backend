@@ -70,6 +70,44 @@ def test_google_login_preserves_unencoded_registration_redirect(monkeypatch) -> 
     )
 
 
+def test_google_login_allows_frontend_absolute_redirect(monkeypatch) -> None:
+    created_state: dict = {}
+
+    def fake_create(self, **kwargs):
+        created_state.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(OAuthStateRepository, "create", fake_create)
+
+    response = client.get(
+        "/api/v1/auth/google/login",
+        params={"redirect_to": "http://localhost:3000/app/dashboard?tab=home"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert created_state["redirect_to"] == "/app/dashboard?tab=home"
+
+
+def test_google_login_rejects_external_redirect(monkeypatch) -> None:
+    created_state: dict = {}
+
+    def fake_create(self, **kwargs):
+        created_state.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(OAuthStateRepository, "create", fake_create)
+
+    response = client.get(
+        "/api/v1/auth/google/login",
+        params={"redirect_to": "https://evil.example/app/dashboard"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert created_state["redirect_to"] == "/dashboard"
+
+
 def test_google_callback_invalid_state_redirects_error(monkeypatch) -> None:
     monkeypatch.setattr(
         OAuthStateRepository,

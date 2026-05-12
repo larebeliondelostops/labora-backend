@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from sqlalchemy.orm import Session
 
 from app.models.user import User
@@ -38,11 +36,6 @@ class AuthService:
                 raise UserDisabledError("User is disabled")
             user = self.users.update_from_google_profile(user, profile)
 
-        if profile.email_verified:
-            user.email_verified_at = user.email_verified_at or datetime.utcnow()
-            user.is_verified = True
-            user.status = "active"
-        user.last_login_at = datetime.utcnow()
         self.external_accounts.create_or_update_for_user(user, profile)
         self.db.commit()
         self.db.refresh(user)

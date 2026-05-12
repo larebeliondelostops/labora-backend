@@ -175,12 +175,13 @@ class AccountAuthService:
         )
         self.db.commit()
 
+        account_user = self._account_user(user)
         return {
             "accessToken": tokens["accessToken"],
             "refreshToken": tokens["refreshToken"],
             "expiresIn": settings.jwt_access_ttl_seconds,
-            "user": self._account_user(user).model_dump(by_alias=True),
-            "nextStep": "dashboard",
+            "user": account_user.model_dump(by_alias=True),
+            "nextStep": account_user.next_step,
             "sessionId": tokens["sessionId"],
         }
 
@@ -235,10 +236,15 @@ class AccountAuthService:
         )
         self.db.commit()
 
+        next_step = (
+            "complete_profile"
+            if user is not None and not _registration_completed(user)
+            else "consents"
+        )
         return {
             "verified": True,
             "userStatus": user.status if user else "active",
-            "nextStep": "consents",
+            "nextStep": next_step,
         }
 
     def resend_otp(
@@ -416,9 +422,22 @@ class AccountAuthService:
         ip_address: str | None,
         user_agent: str | None,
     ) -> AccountUser:
+        document_type = payload.document_type or user.document_type
+        document_number = payload.document_number or user.document_number
+        if document_type and document_number:
+            existing_user = self.users.get_by_document(document_type, document_number)
+            if existing_user is not None and existing_user.id != user.id:
+                raise ApiError(
+                    status_code=status.HTTP_409_CONFLICT,
+                    code="DOCUMENT_ALREADY_EXISTS",
+                    message="El documento ya esta registrado.",
+                )
+
         previous_state = {
             "firstName": user.first_name,
             "lastName": user.last_name,
+            "documentType": user.document_type,
+            "documentNumber": _mask_document(user.document_number),
             "phone": _mask_phone(user.phone),
         }
         self.users.update_profile(user, payload)
@@ -429,6 +448,8 @@ class AccountAuthService:
             new_state={
                 "firstName": user.first_name,
                 "lastName": user.last_name,
+                "documentType": user.document_type,
+                "documentNumber": _mask_document(user.document_number),
                 "phone": _mask_phone(user.phone),
             },
             ip_address=ip_address,
@@ -514,17 +535,25 @@ class AccountAuthService:
         }
 
     def _account_user(self, user: User) -> AccountUser:
+        email_verified = user.email_verified_at is not None or user.is_verified
+        registration_completed = _registration_completed(user)
+        requires_otp = user.status == "pending_verification" or not email_verified
         return AccountUser(
             id=str(user.id),
             first_name=user.first_name,
             last_name=user.last_name,
+            full_name=user.full_name,
+            avatar_url=user.avatar_url,
             document_type=user.document_type,
             document_number_masked=_mask_document(user.document_number),
             email=user.email,
             phone_masked=_mask_phone(user.phone),
             status=user.status,
-            email_verified=user.email_verified_at is not None or user.is_verified,
+            email_verified=email_verified,
             phone_verified=user.phone_verified_at is not None,
+            requires_otp=requires_otp,
+            registration_completed=registration_completed,
+            next_step=_next_step(user, requires_otp, registration_completed),
             roles=[user.role],
             created_at=user.created_at,
         )
@@ -567,6 +596,31 @@ def _mask_document(document_number: str | None) -> str | None:
         return None
     suffix = document_number[-4:]
     return f"{'*' * max(len(document_number) - 4, 0)}{suffix}"
+
+
+def _registration_completed(user: User) -> bool:
+    return all(
+        [
+            user.first_name,
+            user.last_name,
+            user.document_type,
+            user.document_number,
+        ]
+    )
+
+
+def _next_step(
+    user: User,
+    requires_otp: bool,
+    registration_completed: bool,
+) -> str:
+    if requires_otp:
+        return "verify_otp"
+    if not registration_completed:
+        return "complete_profile"
+    if user.status in {"blocked", "suspended", "deleted"}:
+        return "contact_support"
+    return "dashboard"
 
 
 def _mask_phone(phone: str | None) -> str | None:

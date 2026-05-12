@@ -39,10 +39,40 @@ from app.services.google_oauth_service import (
 router = APIRouter()
 
 
-def _safe_redirect_path(redirect_to: str | None, default: str = "/dashboard") -> str:
-    if not redirect_to or not redirect_to.startswith("/") or redirect_to.startswith("//"):
+def _safe_relative_redirect(redirect_to: str | None, default: str = "/dashboard") -> str:
+    if (
+        not redirect_to
+        or not redirect_to.startswith("/")
+        or redirect_to.startswith("//")
+        or "\\" in redirect_to
+    ):
         return default
     return redirect_to
+
+
+def _allowed_frontend_origins() -> set[str]:
+    origins = set()
+    for origin in [settings.frontend_url, *settings.cors_origins]:
+        parsed = urlsplit(origin)
+        if parsed.scheme and parsed.netloc:
+            origins.add(f"{parsed.scheme}://{parsed.netloc}")
+    return origins
+
+
+def _safe_redirect_target(redirect_to: str | None, default: str = "/dashboard") -> str:
+    if not redirect_to:
+        return default
+
+    candidate = redirect_to.strip()
+    parsed = urlsplit(candidate)
+    if parsed.scheme or parsed.netloc:
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if origin not in _allowed_frontend_origins():
+            return default
+        relative_url = urlunsplit(("", "", parsed.path or "/", parsed.query, parsed.fragment))
+        return _safe_relative_redirect(relative_url, default)
+
+    return _safe_relative_redirect(candidate, default)
 
 
 def _redirect_to_from_request(request: Request, redirect_to: str | None) -> str:
@@ -51,12 +81,12 @@ def _redirect_to_from_request(request: Request, redirect_to: str | None) -> str:
     if marker in raw_query:
         raw_redirect = raw_query.split(marker, 1)[1]
         if raw_redirect.startswith("/"):
-            return _safe_redirect_path(unquote_plus(raw_redirect))
-    return _safe_redirect_path(redirect_to)
+            return _safe_redirect_target(unquote_plus(raw_redirect))
+    return _safe_redirect_target(redirect_to)
 
 
 def _frontend_url(path: str, params: dict[str, str]) -> str:
-    safe_path = _safe_redirect_path(path)
+    safe_path = _safe_redirect_target(path)
     parsed = urlsplit(safe_path)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query.update(params)
