@@ -55,6 +55,12 @@ class AccountAuthService:
                 status_code=status.HTTP_409_CONFLICT,
                 code="DOCUMENT_ALREADY_EXISTS",
                 message="El documento ya esta registrado.",
+                details=[
+                    {
+                        "field": "documentNumber",
+                        "message": "Ya existe una cuenta asociada a este documento.",
+                    }
+                ],
             )
 
         user = self.users.create_from_registration(payload)
@@ -457,6 +463,12 @@ class AccountAuthService:
                     status_code=status.HTTP_409_CONFLICT,
                     code="DOCUMENT_ALREADY_EXISTS",
                     message="El documento ya esta registrado.",
+                    details=[
+                        {
+                            "field": "documentNumber",
+                            "message": "Ya existe una cuenta asociada a este documento.",
+                        }
+                    ],
                 )
 
         previous_state = {
