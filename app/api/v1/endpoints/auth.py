@@ -387,11 +387,20 @@ def google_callback(
     except UserDisabledError:
         return _error_redirect("user_disabled")
 
-    session_data = AccountAuthService(db).create_session_for_user(
+    account_auth = AccountAuthService(db)
+    session_data = account_auth.create_session_for_user(
         user=user,
         ip_address=get_client_ip(request),
         user_agent=get_user_agent(request),
     )
+    account_user = session_data.get("user", {})
+    if account_user.get("requiresOtp") is True:
+        account_auth.send_register_otp_for_user(
+            user=user,
+            ip_address=get_client_ip(request),
+            user_agent=get_user_agent(request),
+        )
+
     response = RedirectResponse(
         _frontend_url(oauth_state.redirect_to, {"auth": "success"}),
         status_code=303,

@@ -185,6 +185,32 @@ class AccountAuthService:
             "sessionId": tokens["sessionId"],
         }
 
+    def send_register_otp_for_user(
+        self,
+        *,
+        user: User,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> dict[str, Any]:
+        if user.status != "pending_verification" and user.email_verified_at:
+            return {"sent": False, "reason": "already_verified"}
+
+        otp_code = self._issue_otp(
+            user=user,
+            recipient=user.email,
+            purpose="register",
+        )
+        self.email.send_otp(recipient=user.email, code=otp_code, purpose="register")
+        self._audit(
+            "auth.otp.sent",
+            user=user,
+            metadata={"purpose": "register", "channel": "email", "trigger": "google_callback"},
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        self.db.commit()
+        return {"sent": True, "cooldownSeconds": 60}
+
     def verify_otp(
         self,
         *,

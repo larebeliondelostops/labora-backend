@@ -198,6 +198,7 @@ def test_google_callback_success_sets_cookie(monkeypatch) -> None:
             "refreshToken": "backend-refresh-token",
             "expiresIn": 900,
             "sessionId": str(uuid4()),
+            "user": {"requiresOtp": False},
         },
     )
 
@@ -261,7 +262,14 @@ def test_google_callback_registration_redirect_keeps_next_query(monkeypatch) -> 
             "refreshToken": "backend-refresh-token",
             "expiresIn": 900,
             "sessionId": str(uuid4()),
+            "user": {"requiresOtp": True},
         },
+    )
+    sent_otp: dict = {}
+    monkeypatch.setattr(
+        AccountAuthService,
+        "send_register_otp_for_user",
+        lambda self, user, ip_address, user_agent: sent_otp.update({"sent": True}),
     )
 
     response = client.get(
@@ -281,6 +289,7 @@ def test_google_callback_registration_redirect_keeps_next_query(monkeypatch) -> 
     assert query["next"] == ["/registro?step=datos"]
     assert query["auto"] == ["1"]
     assert query["auth"] == ["success"]
+    assert sent_otp == {"sent": True}
 
 
 def test_logout_clears_cookie() -> None:
