@@ -22,6 +22,18 @@ class User(Base):
         index=True,
         nullable=False,
     )
+    document_type: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
+    document_number: Mapped[str | None] = mapped_column(
+        String(80),
+        nullable=True,
+    )
+    phone: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
     password_hash: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
@@ -57,8 +69,27 @@ class User(Base):
         default=False,
         nullable=False,
     )
+    status: Mapped[str] = mapped_column(
+        String(50),
+        default="pending_verification",
+        nullable=False,
+        index=True,
+    )
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
+    phone_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
+        index=True,
         default=datetime.utcnow,
         nullable=False,
     )
@@ -67,6 +98,10 @@ class User(Base):
         default=datetime.utcnow,
         onupdate=datetime.utcnow,
         nullable=False,
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
     )
 
     external_auth_accounts: Mapped[list["ExternalAuthAccount"]] = relationship(

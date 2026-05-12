@@ -14,6 +14,23 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = "change-this-secret-before-production"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 120
+    JWT_ACCESS_SECRET: str = ""
+    JWT_ACCESS_TTL_SECONDS: int = 900
+    REFRESH_TOKEN_TTL_DAYS: int = 30
+    PASSWORD_HASH_ALGORITHM: str = "bcrypt"
+    OTP_TTL_MINUTES: int = 10
+    OTP_MAX_ATTEMPTS: int = 5
+    AUTH_RATE_LIMIT_WINDOW_SECONDS: int = 900
+    AUTH_RATE_LIMIT_MAX_ATTEMPTS: int = 10
+    APP_FRONTEND_URL: str = ""
+    EMAIL_PROVIDER: str = "console"
+    EMAIL_FROM: str = "no-reply@labora.local"
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_USE_TLS: bool = True
+    SMTP_USE_SSL: bool = False
 
     DATABASE_URL: str
 
@@ -68,12 +85,40 @@ class Settings(BaseSettings):
         return self.JWT_SECRET_KEY
 
     @property
+    def jwt_access_secret(self) -> str:
+        return self.JWT_ACCESS_SECRET or self.JWT_SECRET_KEY
+
+    @property
     def jwt_algorithm(self) -> str:
         return self.JWT_ALGORITHM
 
     @property
     def access_token_expire_minutes(self) -> int:
         return self.ACCESS_TOKEN_EXPIRE_MINUTES
+
+    @property
+    def jwt_access_ttl_seconds(self) -> int:
+        return self.JWT_ACCESS_TTL_SECONDS
+
+    @property
+    def refresh_token_ttl_days(self) -> int:
+        return self.REFRESH_TOKEN_TTL_DAYS
+
+    @property
+    def otp_ttl_minutes(self) -> int:
+        return self.OTP_TTL_MINUTES
+
+    @property
+    def otp_max_attempts(self) -> int:
+        return self.OTP_MAX_ATTEMPTS
+
+    @property
+    def auth_rate_limit_window_seconds(self) -> int:
+        return self.AUTH_RATE_LIMIT_WINDOW_SECONDS
+
+    @property
+    def auth_rate_limit_max_attempts(self) -> int:
+        return self.AUTH_RATE_LIMIT_MAX_ATTEMPTS
 
     @property
     def database_url(self) -> str:
@@ -99,7 +144,39 @@ class Settings(BaseSettings):
 
     @property
     def frontend_url(self) -> str:
-        return self.FRONTEND_URL.rstrip("/")
+        return (self.APP_FRONTEND_URL or self.FRONTEND_URL).rstrip("/")
+
+    @property
+    def email_provider(self) -> str:
+        return self.EMAIL_PROVIDER.lower()
+
+    @property
+    def email_from(self) -> str:
+        return self.EMAIL_FROM
+
+    @property
+    def smtp_host(self) -> str:
+        return self.SMTP_HOST
+
+    @property
+    def smtp_port(self) -> int:
+        return self.SMTP_PORT
+
+    @property
+    def smtp_username(self) -> str:
+        return self.SMTP_USERNAME
+
+    @property
+    def smtp_password(self) -> str:
+        return self.SMTP_PASSWORD
+
+    @property
+    def smtp_use_tls(self) -> bool:
+        return self.SMTP_USE_TLS
+
+    @property
+    def smtp_use_ssl(self) -> bool:
+        return self.SMTP_USE_SSL
 
     @property
     def auth_cookie_name(self) -> str:

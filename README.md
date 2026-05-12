@@ -75,3 +75,40 @@ docker compose exec labora-backend pytest
 - `GET /`
 - `GET /api/v1/health`
 - `GET /api/v1/health/db`
+
+## Modulo cuenta y autenticacion
+
+Variables principales:
+
+```env
+JWT_ACCESS_TTL_SECONDS=900
+REFRESH_TOKEN_TTL_DAYS=30
+OTP_TTL_MINUTES=10
+OTP_MAX_ATTEMPTS=5
+AUTH_RATE_LIMIT_WINDOW_SECONDS=900
+AUTH_RATE_LIMIT_MAX_ATTEMPTS=10
+```
+
+Rutas principales:
+
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/verify-otp`
+- `POST /api/v1/auth/resend-otp`
+- `POST /api/v1/auth/forgot-password`
+- `POST /api/v1/auth/reset-password`
+- `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/logout`
+- `POST /api/v1/auth/logout-all`
+- `GET /api/v1/users/me`
+- `PATCH /api/v1/users/me`
+- `GET /api/v1/users/me/sessions`
+- `DELETE /api/v1/users/me/sessions/{session_id}`
+
+El OTP del modulo de cuenta se emite y verifica solo por correo electronico.
+
+Despues de desplegar cambios de autenticacion:
+
+```bash
+docker compose exec labora-backend alembic upgrade head
+```
