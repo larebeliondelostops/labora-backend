@@ -1,4 +1,10 @@
 from app.models.audit_event import AuditEvent
+from app.models.consent import (
+    ConsentEvidence,
+    ConsentIdempotencyKey,
+    LegalDocument,
+    UserConsent,
+)
 from app.models.external_auth_account import ExternalAuthAccount
 from app.models.faq_item import FaqItem
 from app.models.lead import Lead
@@ -13,9 +19,12 @@ from app.models.visitor_intent import VisitorIntent
 
 __all__ = [
     "AuditEvent",
+    "ConsentEvidence",
+    "ConsentIdempotencyKey",
     "ExternalAuthAccount",
     "FaqItem",
     "Lead",
+    "LegalDocument",
     "OAuthState",
     "OTPCode",
     "PasswordResetToken",
@@ -23,5 +32,6 @@ __all__ = [
     "PublicEvent",
     "Session",
     "User",
+    "UserConsent",
     "VisitorIntent",
 ]

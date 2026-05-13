@@ -9,7 +9,7 @@ class ApiError(Exception):
         status_code: int,
         code: str,
         message: str,
-        details: list[dict[str, Any]] | None = None,
+        details: Any | None = None,
     ) -> None:
         self.status_code = status_code
         self.code = code
