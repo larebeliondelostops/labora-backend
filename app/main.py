@@ -1,4 +1,7 @@
+import secrets
+
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -35,10 +38,50 @@ def api_error_handler(request, exc: ApiError) -> JSONResponse:
                 "code": exc.code,
                 "message": exc.message,
                 "details": exc.details,
+                "requestId": exc.trace_id,
                 "traceId": exc.trace_id,
             }
         },
     )
+
+
+@app.exception_handler(RequestValidationError)
+def request_validation_error_handler(request, exc: RequestValidationError) -> JSONResponse:
+    request_id = f"req_{secrets.token_urlsafe(8)}"
+    is_case_path = _is_case_path(request.url.path)
+    return JSONResponse(
+        status_code=400 if is_case_path else 422,
+        content={
+            "error": {
+                "code": "CASE_VALIDATION_ERROR" if is_case_path else "VALIDATION_ERROR",
+                "message": "La solicitud contiene datos invalidos.",
+                "details": [
+                    {
+                        "field": _validation_field(error.get("loc", [])),
+                        "message": error.get("msg", "Dato invalido."),
+                    }
+                    for error in exc.errors()
+                ],
+                "requestId": request_id,
+                "traceId": request_id,
+            }
+        },
+    )
+
+
+def _is_case_path(path: str) -> bool:
+    return path.startswith(
+        (
+            f"{settings.API_V1_PREFIX}/cases",
+            f"{settings.API_V1_PREFIX}/admin/cases",
+            f"{settings.API_V1_PREFIX}/internal/cases",
+        )
+    )
+
+
+def _validation_field(loc: list | tuple) -> str:
+    parts = [str(item) for item in loc if item not in {"body", "query", "path"}]
+    return ".".join(parts) or "request"
 
 
 @app.get("/")

@@ -1,0 +1,370 @@
+from datetime import timedelta
+from uuid import UUID, uuid4
+
+import app.models  # noqa: F401
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.core.database import Base, get_db
+from app.core.security import create_access_token
+from app.main import app
+from app.models.audit_event import AuditEvent
+from app.models.case import (
+    CaseHistoryEvent,
+    CaseOwner,
+    CaseStatusHistory,
+    CaseTag,
+    LaboraCase,
+)
+from app.models.consent import (
+    ConsentEvidence,
+    ConsentIdempotencyKey,
+    LegalDocument,
+    UserConsent,
+)
+from app.models.user import User
+from app.services.consent_service import (
+    REQUIRED_CONSENT_TYPES,
+    calculate_document_hash,
+)
+from app.utils.dates import utc_now
+
+
+TABLES = [
+    User.__table__,
+    AuditEvent.__table__,
+    LegalDocument.__table__,
+    UserConsent.__table__,
+    ConsentEvidence.__table__,
+    ConsentIdempotencyKey.__table__,
+    LaboraCase.__table__,
+    CaseOwner.__table__,
+    CaseStatusHistory.__table__,
+    CaseHistoryEvent.__table__,
+    CaseTag.__table__,
+]
+
+TITLES = {
+    "terms_and_conditions": "Terminos y condiciones",
+    "personal_data_processing": "Tratamiento de datos personales",
+    "sensitive_data_processing": "Tratamiento de datos sensibles",
+    "electronic_means": "Medios electronicos",
+    "ai_scope_acknowledgement": "Alcance IA",
+}
+
+
+@pytest.fixture()
+def client_and_session():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=engine,
+    )
+    Base.metadata.create_all(engine, tables=TABLES)
+
+    def override_get_db():
+        db = TestingSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    with TestClient(app) as client:
+        yield client, TestingSessionLocal
+    app.dependency_overrides.clear()
+    Base.metadata.drop_all(engine, tables=list(reversed(TABLES)))
+
+
+def test_create_list_detail_submit_and_history(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+
+    created = client.post("/api/v1/cases", json=_case_payload(), headers=headers)
+
+    assert created.status_code == 201
+    created_data = created.json()
+    assert created_data["caseNumber"].startswith("CASO-")
+    assert created_data["status"] == "created"
+    assert created_data["nextBestAction"] == "upload_documents"
+
+    listed = client.get("/api/v1/cases?status=created", headers=headers)
+    assert listed.status_code == 200
+    assert listed.json()["pagination"]["total"] == 1
+    assert listed.json()["data"][0]["holderFullName"] == "Maria Gomez Perez"
+
+    case_id = created_data["id"]
+    detail = client.get(f"/api/v1/cases/{case_id}", headers=headers)
+    assert detail.status_code == 200
+    detail_data = detail.json()
+    assert detail_data["holder"]["documentNumberMasked"] != "52123456"
+    assert "upload_documents" in detail_data["allowedActions"]
+
+    updated = client.patch(
+        f"/api/v1/cases/{case_id}",
+        json={
+            "holder": {"firstName": "Maria Fernanda"},
+            "caseTypeRequested": "pension_reliquidation",
+        },
+        headers=headers,
+    )
+    assert updated.status_code == 200
+
+    submitted = client.post(f"/api/v1/cases/{case_id}/submit", headers=headers)
+    assert submitted.status_code == 200
+    assert submitted.json()["status"] == "ready_for_documents"
+    assert submitted.json()["currentStep"] == "documents_pending"
+
+    history = client.get(f"/api/v1/cases/{case_id}/history", headers=headers)
+    assert history.status_code == 200
+    event_types = {item["eventType"] for item in history.json()["data"]}
+    assert "expediente.created" in event_types
+    assert "expediente.updated" in event_types
+    assert "expediente.submitted" in event_types
+
+    db = session_factory()
+    try:
+        assert db.query(CaseStatusHistory).filter(CaseStatusHistory.case_id == UUID(case_id)).count() == 2
+        audit_types = {event.event_type for event in db.query(AuditEvent).all()}
+        assert "expediente.created" in audit_types
+        assert "expediente.viewed" in audit_types
+        assert "expediente.submitted" in audit_types
+    finally:
+        db.close()
+
+
+def test_create_case_requires_completed_consents(client_and_session) -> None:
+    client, session_factory = client_and_session
+    _user_id, headers = _create_user(session_factory)
+
+    response = client.post("/api/v1/cases", json=_case_payload(), headers=headers)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "CONSENT_REQUIRED"
+
+
+def test_user_cannot_view_another_users_case(client_and_session) -> None:
+    client, session_factory = client_and_session
+    owner_id, owner_headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, owner_id)
+    _other_id, other_headers = _create_user(session_factory)
+
+    case_id = client.post(
+        "/api/v1/cases",
+        json=_case_payload(),
+        headers=owner_headers,
+    ).json()["id"]
+
+    response = client.get(f"/api/v1/cases/{case_id}", headers=other_headers)
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CASE_ACCESS_DENIED"
+
+    db = session_factory()
+    try:
+        assert (
+            db.query(AuditEvent)
+            .filter(AuditEvent.event_type == "expediente.access_denied")
+            .count()
+            == 1
+        )
+    finally:
+        db.close()
+
+
+def test_admin_can_filter_view_assign_and_tag_cases(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, user_headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    admin_id, admin_headers = _create_user(session_factory, role="admin")
+    reviewer_id, _reviewer_headers = _create_user(session_factory, role="legal_reviewer")
+
+    case_id = client.post(
+        "/api/v1/cases",
+        json=_case_payload(),
+        headers=user_headers,
+    ).json()["id"]
+
+    listed = client.get("/api/v1/admin/cases?q=CASO-&pageSize=50", headers=admin_headers)
+    assert listed.status_code == 200
+    assert listed.json()["pagination"]["total"] == 1
+
+    detail = client.get(f"/api/v1/admin/cases/{case_id}", headers=admin_headers)
+    assert detail.status_code == 200
+    assert detail.json()["holderDocumentNumber"] == "52123456"
+
+    assigned = client.post(
+        f"/api/v1/admin/cases/{case_id}/assign",
+        json={"assigneeUserId": str(reviewer_id), "role": "legal_reviewer"},
+        headers=admin_headers,
+    )
+    assert assigned.status_code == 200
+
+    tagged = client.post(
+        f"/api/v1/admin/cases/{case_id}/tags",
+        json={"tag": "Docente", "source": "admin"},
+        headers=admin_headers,
+    )
+    assert tagged.status_code == 200
+    assert tagged.json()["tag"] == "docente"
+
+    db = session_factory()
+    try:
+        audit_types = {event.event_type for event in db.query(AuditEvent).all()}
+        assert "expediente.admin_viewed" in audit_types
+        assert "expediente.assigned" in audit_types
+        assert "expediente.tag_added" in audit_types
+        assert (
+            db.query(CaseOwner)
+            .filter(
+                CaseOwner.case_id == UUID(case_id),
+                CaseOwner.user_id == reviewer_id,
+                CaseOwner.role == "legal_reviewer",
+            )
+            .count()
+            == 1
+        )
+        assert admin_id is not None
+    finally:
+        db.close()
+
+
+def test_internal_status_and_ai_suggestion(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, user_headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    _system_id, system_headers = _create_user(session_factory, role="system")
+
+    case_id = client.post(
+        "/api/v1/cases",
+        json=_case_payload(),
+        headers=user_headers,
+    ).json()["id"]
+
+    status_response = client.post(
+        f"/api/v1/internal/cases/{case_id}/status",
+        json={
+            "newStatus": "documents_pending",
+            "reason": "Esperando carga documental.",
+            "sourceModule": "documents",
+            "metadata": {"documentCount": 0},
+        },
+        headers=system_headers,
+    )
+    assert status_response.status_code == 200
+    assert status_response.json()["previousStatus"] == "created"
+    assert status_response.json()["newStatus"] == "documents_pending"
+
+    suggestion = client.post(
+        f"/api/v1/internal/cases/{case_id}/ai-suggestion",
+        json={
+            "caseTypeSuggested": "teacher_magisterio_case",
+            "confidence": 0.5,
+            "tags": ["Docente", "Regimen especial"],
+            "source": "initial_questionnaire_ai_v1",
+        },
+        headers=system_headers,
+    )
+    assert suggestion.status_code == 200
+    assert suggestion.json()["caseTypeRequested"] == "labor_history_analysis"
+    assert suggestion.json()["caseTypeSuggested"] == "teacher_magisterio_case"
+    assert suggestion.json()["status"] == "requires_review"
+    assert "docente" in suggestion.json()["tags"]
+
+
+def _create_user(session_factory, *, role: str = "user"):
+    db = session_factory()
+    try:
+        user = User(
+            email=f"{uuid4()}@example.com",
+            first_name="Ana",
+            last_name="Gomez",
+            full_name="Ana Gomez",
+            role=role,
+            is_active=True,
+            is_verified=True,
+            status="active",
+            email_verified_at=utc_now(),
+        )
+        db.add(user)
+        db.commit()
+        token = create_access_token(str(user.id), {"role": role, "sid": str(uuid4())})
+        return user.id, {"Authorization": f"Bearer {token}"}
+    finally:
+        db.close()
+
+
+def _grant_required_consents(session_factory, user_id: UUID) -> None:
+    db = session_factory()
+    now = utc_now()
+    try:
+        for consent_type in REQUIRED_CONSENT_TYPES:
+            title = TITLES[consent_type]
+            content = f"# {title}\n\nContenido legal para {consent_type}."
+            document = LegalDocument(
+                type=consent_type,
+                title=title,
+                slug=f"{consent_type}-2026.05.01",
+                content_markdown=content,
+                content_plain_text=None,
+                version="2026.05.01",
+                hash_sha256=calculate_document_hash(
+                    consent_type=consent_type,
+                    title=title,
+                    version="2026.05.01",
+                    content_markdown=content,
+                ),
+                status="active",
+                is_required=True,
+                effective_from=now - timedelta(days=1),
+            )
+            db.add(document)
+            db.flush()
+            db.add(
+                UserConsent(
+                    user_id=user_id,
+                    legal_document_id=document.id,
+                    consent_type=consent_type,
+                    document_version=document.version,
+                    document_hash_sha256=document.hash_sha256,
+                    accepted=True,
+                    accepted_at=now,
+                    ip_address="127.0.0.1",
+                    user_agent="LaboraTest/1.0",
+                    locale="es-CO",
+                    source="web",
+                    evidence_hash_sha256="a" * 64,
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _case_payload() -> dict:
+    return {
+        "holderType": "self",
+        "holder": {
+            "firstName": "Maria",
+            "lastName": "Gomez Perez",
+            "documentType": "CC",
+            "documentNumber": "52123456",
+            "birthDate": "1965-03-12",
+            "email": "maria@example.com",
+            "phone": "+573001112233",
+        },
+        "actingAsThirdParty": False,
+        "thirdPartyRelationship": None,
+        "caseTypeRequested": "labor_history_analysis",
+        "pensionFundOrEntity": "Colpensiones",
+        "situationType": "pensioned_with_doubts",
+    }

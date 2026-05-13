@@ -1,4 +1,11 @@
 from app.models.audit_event import AuditEvent
+from app.models.case import (
+    CaseHistoryEvent,
+    CaseOwner,
+    CaseStatusHistory,
+    CaseTag,
+    LaboraCase,
+)
 from app.models.consent import (
     ConsentEvidence,
     ConsentIdempotencyKey,
@@ -19,12 +26,17 @@ from app.models.visitor_intent import VisitorIntent
 
 __all__ = [
     "AuditEvent",
+    "CaseHistoryEvent",
+    "CaseOwner",
+    "CaseStatusHistory",
+    "CaseTag",
     "ConsentEvidence",
     "ConsentIdempotencyKey",
     "ExternalAuthAccount",
     "FaqItem",
     "Lead",
     "LegalDocument",
+    "LaboraCase",
     "OAuthState",
     "OTPCode",
     "PasswordResetToken",
