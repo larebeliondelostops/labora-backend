@@ -160,7 +160,7 @@ def test_get_current_legal_documents_returns_only_active(client_and_session) -> 
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert len(data) == 5
+    assert len(data) == len(REQUIRED_CONSENT_TYPES)
     assert {item["type"] for item in data} == set(REQUIRED_CONSENT_TYPES)
     assert all(item["version"] == "2026.05.01" for item in data)
 
@@ -177,7 +177,7 @@ def test_get_current_legal_documents_accepts_http_only_cookie_auth(
     response = client.get("/api/v1/legal-documents/current")
 
     assert response.status_code == 200
-    assert len(response.json()["data"]) == 5
+    assert len(response.json()["data"]) == len(REQUIRED_CONSENT_TYPES)
 
 
 def test_consent_status_without_user_consents_is_not_started(client_and_session) -> None:
@@ -196,30 +196,37 @@ def test_consent_status_without_user_consents_is_not_started(client_and_session)
     assert data["lastAcceptedAt"] is None
 
 
-def test_consent_status_with_partial_current_consents_is_in_progress(
+def test_consent_status_with_stale_terms_version_is_in_progress(
     client_and_session,
 ) -> None:
     client, session_factory = client_and_session
     _user_id, headers = _create_user(session_factory)
-    document_ids = _create_legal_documents(session_factory)
-    accepted_types = ["terms_and_conditions", "personal_data_processing"]
+    old_document_ids = _create_legal_documents(
+        session_factory,
+        version="2026.05.01",
+    )
 
     response = client.post(
         "/api/v1/consents",
-        json={"items": _consent_items(document_ids, accepted_types), "source": "web"},
+        json={"items": _consent_items(old_document_ids), "source": "web"},
         headers=headers,
     )
     assert response.status_code == 201
+    _create_legal_documents(
+        session_factory,
+        types=["terms_and_conditions"],
+        version="2026.06.01",
+    )
 
     status_response = client.get("/api/v1/users/me/consents/status", headers=headers)
 
     data = status_response.json()["data"]
     assert data["status"] == "in_progress"
     assert data["canUploadDocuments"] is False
-    assert set(data["acceptedConsentTypes"]) == set(accepted_types)
-    assert set(data["missingConsentTypes"]) == set(REQUIRED_CONSENT_TYPES) - set(
-        accepted_types
-    )
+    assert set(data["acceptedConsentTypes"]) == set(REQUIRED_CONSENT_TYPES) - {
+        "terms_and_conditions"
+    }
+    assert data["missingConsentTypes"] == ["terms_and_conditions"]
     assert data["lastAcceptedAt"] is not None
 
 
@@ -248,7 +255,10 @@ def test_register_all_required_consents_completes_status_and_audits(client_and_s
 
     db = session_factory()
     try:
-        assert db.query(UserConsent).filter(UserConsent.user_id == user_id).count() == 5
+        assert (
+            db.query(UserConsent).filter(UserConsent.user_id == user_id).count()
+            == len(REQUIRED_CONSENT_TYPES)
+        )
         event_names = {event.event_type for event in db.query(AuditEvent).all()}
         assert "consentimientos_cumplimiento.submitted" in event_names
         assert "consentimientos_cumplimiento.created" in event_names
@@ -275,12 +285,15 @@ def test_resending_already_accepted_consents_is_idempotent_without_header(
     assert status_response.json()["data"]["status"] == "completed"
     db = session_factory()
     try:
-        assert db.query(UserConsent).filter(UserConsent.user_id == user_id).count() == 5
+        assert (
+            db.query(UserConsent).filter(UserConsent.user_id == user_id).count()
+            == len(REQUIRED_CONSENT_TYPES)
+        )
         assert (
             db.query(AuditEvent)
             .filter(AuditEvent.event_type == "consentimientos_cumplimiento.created")
             .count()
-            == 5
+            == len(REQUIRED_CONSENT_TYPES)
         )
     finally:
         db.close()

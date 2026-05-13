@@ -52,7 +52,8 @@ class ConsentComplianceService:
         user_agent: str | None,
     ) -> list[dict[str, Any]]:
         self._validate_consent_types(types or [])
-        documents, conflicts = self._select_current_documents(types=types)
+        selected_types = types or REQUIRED_CONSENT_TYPES
+        documents, conflicts = self._select_current_documents(types=selected_types)
         for consent_type in conflicts:
             self._audit(
                 "legal_document.current_conflict",
@@ -66,7 +67,7 @@ class ConsentComplianceService:
             f"{CONSENT_AUDIT_PREFIX}.viewed",
             user=user,
             entity_type="legal_document",
-            metadata={"types": types or REQUIRED_CONSENT_TYPES},
+            metadata={"types": selected_types},
             ip_address=ip_address,
             user_agent=user_agent,
         )
