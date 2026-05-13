@@ -160,11 +160,16 @@ class ConsentComplianceService:
                     legal_document_id=legal_document.id,
                 )
                 if existing_consent is not None:
-                    raise ApiError(
-                        status_code=status.HTTP_409_CONFLICT,
-                        code="duplicate_consent",
-                        message="El consentimiento ya fue registrado para esta version legal.",
+                    accepted_consents.append(
+                        {
+                            "id": str(existing_consent.id),
+                            "consentType": existing_consent.consent_type,
+                            "documentVersion": existing_consent.document_version,
+                            "acceptedAt": existing_consent.accepted_at,
+                            "evidenceHashSha256": existing_consent.evidence_hash_sha256,
+                        }
                     )
+                    continue
 
                 evidence_payload = _evidence_payload(
                     user_id=user.id,
@@ -403,7 +408,9 @@ class ConsentComplianceService:
             "requiredConsentTypes": required_types or REQUIRED_CONSENT_TYPES,
             "acceptedConsentTypes": accepted_types,
             "missingConsentTypes": missing_types,
-            "lastAcceptedAt": self.consents.get_last_accepted_at(user_id),
+            "lastAcceptedAt": accepted_consents[0].accepted_at
+            if accepted_consents
+            else None,
         }
 
     def _load_and_validate_documents(

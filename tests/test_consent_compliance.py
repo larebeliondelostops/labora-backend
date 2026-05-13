@@ -180,6 +180,49 @@ def test_get_current_legal_documents_accepts_http_only_cookie_auth(
     assert len(response.json()["data"]) == 5
 
 
+def test_consent_status_without_user_consents_is_not_started(client_and_session) -> None:
+    client, session_factory = client_and_session
+    _user_id, headers = _create_user(session_factory)
+    _create_legal_documents(session_factory)
+
+    response = client.get("/api/v1/users/me/consents/status", headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == "not_started"
+    assert data["canUploadDocuments"] is False
+    assert data["acceptedConsentTypes"] == []
+    assert data["missingConsentTypes"] == REQUIRED_CONSENT_TYPES
+    assert data["lastAcceptedAt"] is None
+
+
+def test_consent_status_with_partial_current_consents_is_in_progress(
+    client_and_session,
+) -> None:
+    client, session_factory = client_and_session
+    _user_id, headers = _create_user(session_factory)
+    document_ids = _create_legal_documents(session_factory)
+    accepted_types = ["terms_and_conditions", "personal_data_processing"]
+
+    response = client.post(
+        "/api/v1/consents",
+        json={"items": _consent_items(document_ids, accepted_types), "source": "web"},
+        headers=headers,
+    )
+    assert response.status_code == 201
+
+    status_response = client.get("/api/v1/users/me/consents/status", headers=headers)
+
+    data = status_response.json()["data"]
+    assert data["status"] == "in_progress"
+    assert data["canUploadDocuments"] is False
+    assert set(data["acceptedConsentTypes"]) == set(accepted_types)
+    assert set(data["missingConsentTypes"]) == set(REQUIRED_CONSENT_TYPES) - set(
+        accepted_types
+    )
+    assert data["lastAcceptedAt"] is not None
+
+
 def test_register_all_required_consents_completes_status_and_audits(client_and_session) -> None:
     client, session_factory = client_and_session
     user_id, headers = _create_user(session_factory)
@@ -196,7 +239,12 @@ def test_register_all_required_consents_completes_status_and_audits(client_and_s
     assert response.json()["data"]["canUploadDocuments"] is True
 
     status_response = client.get("/api/v1/users/me/consents/status", headers=headers)
-    assert status_response.json()["data"]["status"] == "completed"
+    status_data = status_response.json()["data"]
+    assert status_data["status"] == "completed"
+    assert status_data["canUploadDocuments"] is True
+    assert status_data["missingConsentTypes"] == []
+    assert set(status_data["acceptedConsentTypes"]) == set(REQUIRED_CONSENT_TYPES)
+    assert status_data["lastAcceptedAt"] is not None
 
     db = session_factory()
     try:
@@ -205,6 +253,35 @@ def test_register_all_required_consents_completes_status_and_audits(client_and_s
         assert "consentimientos_cumplimiento.submitted" in event_names
         assert "consentimientos_cumplimiento.created" in event_names
         assert "consentimientos_cumplimiento.completed" in event_names
+    finally:
+        db.close()
+
+
+def test_resending_already_accepted_consents_is_idempotent_without_header(
+    client_and_session,
+) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    document_ids = _create_legal_documents(session_factory)
+    payload = {"items": _consent_items(document_ids), "source": "web", "locale": "es-CO"}
+
+    first = client.post("/api/v1/consents", json=payload, headers=headers)
+    second = client.post("/api/v1/consents", json=payload, headers=headers)
+    status_response = client.get("/api/v1/users/me/consents/status", headers=headers)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert second.json()["data"]["status"] == "completed"
+    assert status_response.json()["data"]["status"] == "completed"
+    db = session_factory()
+    try:
+        assert db.query(UserConsent).filter(UserConsent.user_id == user_id).count() == 5
+        assert (
+            db.query(AuditEvent)
+            .filter(AuditEvent.event_type == "consentimientos_cumplimiento.created")
+            .count()
+            == 5
+        )
     finally:
         db.close()
 
@@ -412,5 +489,98 @@ def test_activating_new_version_preserves_historical_consents(client_and_session
         assert consent.document_version == "2026.05.01"
         assert old_document.status == "archived"
         assert db.get(LegalDocument, UUID(new_document_id)).status == "active"
+    finally:
+        db.close()
+
+
+def test_status_tracks_only_current_required_document_versions(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, user_headers = _create_user(session_factory)
+    _admin_id, admin_headers = _create_user(session_factory, role="legal_admin")
+    document_ids = _create_legal_documents(session_factory)
+
+    accepted = client.post(
+        "/api/v1/consents",
+        json={"items": _consent_items(document_ids), "source": "web"},
+        headers=user_headers,
+    )
+    assert accepted.status_code == 201
+    old_current_documents = client.get(
+        "/api/v1/legal-documents/current",
+        headers=user_headers,
+    ).json()["data"]
+    old_terms_hash = next(
+        document["hashSha256"]
+        for document in old_current_documents
+        if document["type"] == "terms_and_conditions"
+    )
+
+    created = client.post(
+        "/api/v1/admin/legal-documents",
+        json={
+            "type": "terms_and_conditions",
+            "title": "Terminos y condiciones version nueva",
+            "contentMarkdown": "# Terminos nuevos\n\nNuevo hash legal.",
+            "version": "2026.06.01",
+            "status": "draft",
+            "isRequired": True,
+            "effectiveFrom": (utc_now() + timedelta(days=1)).isoformat(),
+        },
+        headers=admin_headers,
+    )
+    assert created.status_code == 201
+    new_document_id = created.json()["data"]["id"]
+
+    activated = client.post(
+        f"/api/v1/admin/legal-documents/{new_document_id}/activate",
+        headers=admin_headers,
+    )
+    assert activated.status_code == 200
+
+    stale_status = client.get("/api/v1/users/me/consents/status", headers=user_headers)
+    stale_data = stale_status.json()["data"]
+    assert stale_data["status"] == "in_progress"
+    assert stale_data["canUploadDocuments"] is False
+    assert stale_data["missingConsentTypes"] == ["terms_and_conditions"]
+    assert "terms_and_conditions" not in stale_data["acceptedConsentTypes"]
+    assert set(stale_data["acceptedConsentTypes"]) == set(REQUIRED_CONSENT_TYPES) - {
+        "terms_and_conditions"
+    }
+
+    current_documents = client.get(
+        "/api/v1/legal-documents/current",
+        headers=user_headers,
+    ).json()["data"]
+    current_terms = next(
+        document
+        for document in current_documents
+        if document["type"] == "terms_and_conditions"
+    )
+    assert current_terms["id"] == new_document_id
+    assert current_terms["hashSha256"] != old_terms_hash
+
+    updated = client.post(
+        "/api/v1/consents",
+        json={
+            "items": _consent_items(
+                {"terms_and_conditions": new_document_id},
+                ["terms_and_conditions"],
+            ),
+            "source": "web",
+        },
+        headers=user_headers,
+    )
+    assert updated.status_code == 201
+
+    completed = client.get("/api/v1/users/me/consents/status", headers=user_headers)
+    completed_data = completed.json()["data"]
+    assert completed_data["status"] == "completed"
+    assert completed_data["canUploadDocuments"] is True
+    assert completed_data["missingConsentTypes"] == []
+    assert set(completed_data["acceptedConsentTypes"]) == set(REQUIRED_CONSENT_TYPES)
+
+    db = session_factory()
+    try:
+        assert db.query(UserConsent).filter(UserConsent.user_id == user_id).count() == 6
     finally:
         db.close()
