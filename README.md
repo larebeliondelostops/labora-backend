@@ -87,6 +87,29 @@ OTP_TTL_MINUTES=10
 OTP_MAX_ATTEMPTS=5
 AUTH_RATE_LIMIT_WINDOW_SECONDS=900
 AUTH_RATE_LIMIT_MAX_ATTEMPTS=10
+CORS_ORIGINS=http://localhost:3000,https://labora.centralspike.com
+CORS_ALLOW_CREDENTIALS=true
+AUTH_COOKIE_NAME=labora_access_token
+AUTH_COOKIE_HTTPONLY=true
+```
+
+Para frontend local con cookies HttpOnly:
+
+```env
+APP_FRONTEND_URL=http://localhost:3000
+AUTH_COOKIE_SECURE=false
+AUTH_COOKIE_SAMESITE=lax
+AUTH_COOKIE_DOMAIN=
+```
+
+Para produccion con `https://labora.centralspike.com` consumiendo
+`https://labora.backend.centralspike.com/api/v1`:
+
+```env
+APP_FRONTEND_URL=https://labora.centralspike.com
+AUTH_COOKIE_SECURE=true
+AUTH_COOKIE_SAMESITE=lax
+AUTH_COOKIE_DOMAIN=
 ```
 
 Rutas principales:

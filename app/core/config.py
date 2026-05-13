@@ -34,7 +34,7 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
 
-    CORS_ORIGINS: str = "http://localhost:3000"
+    CORS_ORIGINS: str = "http://localhost:3000,https://labora.centralspike.com"
     CORS_ALLOW_CREDENTIALS: bool = True
 
     FRONTEND_URL: str = "http://localhost:3000"

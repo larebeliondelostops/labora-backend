@@ -165,6 +165,21 @@ def test_get_current_legal_documents_returns_only_active(client_and_session) -> 
     assert all(item["version"] == "2026.05.01" for item in data)
 
 
+def test_get_current_legal_documents_accepts_http_only_cookie_auth(
+    client_and_session,
+) -> None:
+    client, session_factory = client_and_session
+    _user_id, headers = _create_user(session_factory)
+    _create_legal_documents(session_factory)
+    access_token = headers["Authorization"].split(" ", 1)[1]
+    client.cookies.set("labora_access_token", access_token)
+
+    response = client.get("/api/v1/legal-documents/current")
+
+    assert response.status_code == 200
+    assert len(response.json()["data"]) == 5
+
+
 def test_register_all_required_consents_completes_status_and_audits(client_and_session) -> None:
     client, session_factory = client_and_session
     user_id, headers = _create_user(session_factory)
