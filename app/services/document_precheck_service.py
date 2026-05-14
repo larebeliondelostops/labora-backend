@@ -1,3 +1,4 @@
+import logging
 import uuid
 from decimal import Decimal
 from typing import Any
@@ -24,10 +25,12 @@ from app.services.ai_provider import (
 )
 from app.services.consent_service import ConsentComplianceService
 from app.services.document_issue_service import build_issue
-from app.services.document_storage_service import DocumentStorageService, StorageProviderError
-from app.services.ocr_preview_service import OcrPreviewService
+from app.services.document_storage_service import DocumentStorageService
+from app.services.ocr_preview_service import OcrPreviewError, OcrPreviewService, StorageReadError
 from app.utils.dates import utc_now
 
+
+logger = logging.getLogger(__name__)
 
 ADMIN_REVIEW_ROLES = {"admin", "legal_admin", "reviewer", "legal_ops", "legal_reviewer"}
 ADMIN_ROLES = {"admin", "legal_admin"}
@@ -159,7 +162,11 @@ class DocumentPrecheckService:
         return {
             "caseId": str(case.id),
             "items": [
-                self._precheck_detail(item, document=self.documents.get(item.document_id))
+                self._precheck_detail(
+                    item,
+                    document=self.documents.get(item.document_id),
+                    include_pages=document_id is not None,
+                )
                 for item in items
             ],
         }
@@ -206,16 +213,24 @@ class DocumentPrecheckService:
         self._require_can_view_case(case, user)
         self._require_sensitive_consent(user)
         self._require_document_available(document)
-        job = OcrPreviewService(self.db).create_preview(
-            document,
-            actor=user,
-            max_pages=max_pages,
-            include_text_preview=include_text_preview,
-            force=force,
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
-        self.db.commit()
+        try:
+            job = OcrPreviewService(self.db).create_preview(
+                document,
+                actor=user,
+                max_pages=max_pages,
+                include_text_preview=include_text_preview,
+                force=force,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            self.db.commit()
+        except OcrPreviewError as exc:
+            self.db.commit()
+            raise ApiError(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                code=exc.code,
+                message=str(exc),
+            ) from exc
         return {
             "ocrJobId": str(job.id),
             "documentId": str(document.id),
@@ -233,16 +248,27 @@ class DocumentPrecheckService:
         document = self._get_document_or_404(document_id)
         case = self._get_case_or_404(document.case_id)
         self._require_can_view_case(case, user)
+        self._require_sensitive_consent(user)
+        self._require_document_available(document)
         job = self.prechecks.latest_ocr_job(document.id)
         if job is None:
-            return {
-                "documentId": str(document.id),
-                "status": "not_started",
-                "engine": None,
-                "pagesTotal": None,
-                "pagesProcessed": 0,
-                "pages": [],
-            }
+            try:
+                job = OcrPreviewService(self.db).create_preview(
+                    document,
+                    actor=user,
+                    max_pages=5,
+                    include_text_preview=True,
+                    force=False,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                )
+            except OcrPreviewError as exc:
+                self.db.commit()
+                raise ApiError(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    code=exc.code,
+                    message=str(exc),
+                ) from exc
         self._audit(
             "ia_documental_preliminar.viewed",
             precheck=None,
@@ -316,6 +342,16 @@ class DocumentPrecheckService:
         precheck.status = "in_progress"
         precheck.started_at = utc_now()
         precheck.updated_at = precheck.started_at
+        logger.info(
+            "Starting document precheck",
+            extra={
+                "case_id": str(precheck.case_id),
+                "document_id": str(document.id),
+                "precheck_id": str(precheck.id),
+                "storage_key": document.storage_key,
+                "document_size_bytes": document.size_bytes,
+            },
+        )
         self._audit(
             "ia_documental_preliminar.started",
             precheck=precheck,
@@ -341,6 +377,20 @@ class DocumentPrecheckService:
             ocr_issues = _issues_from_ocr_job(ocr_job)
             critical_ocr = any(issue["severity"] == "critical" for issue in ocr_issues)
             if critical_ocr:
+                logger.warning(
+                    "Document precheck blocked by OCR quality",
+                    extra={
+                        "case_id": str(precheck.case_id),
+                        "document_id": str(document.id),
+                        "precheck_id": str(precheck.id),
+                        "storage_key": document.storage_key,
+                        "ocr_job_id": str(ocr_job.id),
+                        "ocr_method": ocr_job.engine,
+                        "pages_processed": ocr_job.pages_processed,
+                        "characters_extracted": _ocr_characters(ocr_job),
+                        "issue_codes": [issue["code"] for issue in ocr_issues],
+                    },
+                )
                 self._finish_without_ai(
                     precheck,
                     document=document,
@@ -356,24 +406,61 @@ class DocumentPrecheckService:
                 )
                 return
 
+            provider = ai_provider_factory()
+            provider_name = getattr(provider, "provider_name", "unknown")
+            provider_model = getattr(provider, "model", "unknown")
             self._audit(
                 "ia_documental_preliminar.ai_classification_started",
                 precheck=precheck,
                 document=document,
                 actor=actor,
-                metadata={"provider": None},
+                metadata={"provider": provider_name, "model": provider_model},
                 ip_address=ip_address,
                 user_agent=user_agent,
             )
-            ai_result = ai_provider_factory().classify_document(
-                _classification_input(document=document, ocr_job=ocr_job)
+            logger.info(
+                "Starting AI document classification",
+                extra={
+                    "case_id": str(precheck.case_id),
+                    "document_id": str(document.id),
+                    "precheck_id": str(precheck.id),
+                    "storage_key": document.storage_key,
+                    "ocr_method": ocr_job.engine,
+                    "pages_processed": ocr_job.pages_processed,
+                    "characters_extracted": _ocr_characters(ocr_job),
+                    "ai_provider": provider_name,
+                    "ai_model": provider_model,
+                },
             )
+            ai_result = provider.classify_document(_classification_input(document=document, ocr_job=ocr_job))
             self._persist_ai_result(
                 precheck,
                 document=document,
                 ocr_job=ocr_job,
                 ocr_issues=ocr_issues,
                 ai_result=ai_result,
+                actor=actor,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+        except StorageReadError as exc:
+            self._finish_technical_failure(
+                precheck,
+                document=document,
+                code=exc.code,
+                issue_code=exc.issue_code,
+                message=str(exc),
+                actor=actor,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+        except OcrPreviewError as exc:
+            self._finish_technical_failure(
+                precheck,
+                document=document,
+                code=exc.code,
+                issue_code=exc.issue_code,
+                message=str(exc),
                 actor=actor,
                 ip_address=ip_address,
                 user_agent=user_agent,
@@ -391,15 +478,18 @@ class DocumentPrecheckService:
             )
         except AiProviderError as exc:
             issue_code = {
+                "AI_PROVIDER_NOT_CONFIGURED": "ai_provider_not_configured",
+                "AI_PROVIDER_CONFIGURATION_ERROR": "ai_provider_not_configured",
                 "AI_PROVIDER_TIMEOUT": "provider_timeout",
                 "AI_PROVIDER_RATE_LIMITED": "provider_rate_limited",
-            }.get(exc.code, "human_review_required")
+                "AI_PROVIDER_INVALID_RESPONSE": "provider_invalid_json",
+            }.get(exc.code, "ai_provider_error")
             self._finish_provider_failure(
                 precheck,
                 document=document,
                 code=exc.code,
                 issue_code=issue_code,
-                message="No fue posible completar la clasificacion IA.",
+                message=str(exc) or "No fue posible completar la clasificacion IA.",
                 actor=actor,
                 ip_address=ip_address,
                 user_agent=user_agent,
@@ -419,6 +509,8 @@ class DocumentPrecheckService:
         actor: User,
         ip_address: str | None,
         user_agent: str | None,
+        error_code: str | None = None,
+        error_message: str | None = None,
     ) -> None:
         previous_state = _precheck_state(precheck)
         precheck.status = status_value
@@ -429,8 +521,25 @@ class DocumentPrecheckService:
         precheck.result_json = {"issues": issues, "summary": summary}
         precheck.completed_at = utc_now() if status_value != "error" else None
         precheck.failed_at = utc_now() if status_value == "error" else None
+        precheck.error_code = error_code
+        precheck.error_message = error_message
         precheck.updated_at = utc_now()
         self.prechecks.replace_issues(precheck.id, document.id, issues)
+        logger.info(
+            "Document precheck finished without AI result",
+            extra={
+                "case_id": str(precheck.case_id),
+                "document_id": str(document.id),
+                "precheck_id": str(precheck.id),
+                "storage_key": document.storage_key,
+                "status": precheck.status,
+                "decision": precheck.decision,
+                "traffic_light": precheck.traffic_light,
+                "confidence_score": _float(precheck.confidence_score),
+                "error_code": error_code,
+                "issue_codes": [issue["code"] for issue in issues],
+            },
+        )
         self._audit_terminal(precheck, document=document, actor=actor, previous_state=previous_state, ip_address=ip_address, user_agent=user_agent)
 
     def _persist_ai_result(
@@ -496,6 +605,25 @@ class DocumentPrecheckService:
             latency_ms=ai_result.latency_ms,
             created_at=utc_now(),
         )
+        logger.info(
+            "AI document classification completed",
+            extra={
+                "case_id": str(precheck.case_id),
+                "document_id": str(document.id),
+                "precheck_id": str(precheck.id),
+                "storage_key": document.storage_key,
+                "ocr_job_id": str(ocr_job.id),
+                "ocr_method": ocr_job.engine,
+                "pages_processed": ocr_job.pages_processed,
+                "characters_extracted": _ocr_characters(ocr_job),
+                "ai_provider": ai_result.provider,
+                "ai_model": ai_result.model,
+                "confidence_score": output.confidence_score,
+                "decision": precheck.decision,
+                "traffic_light": precheck.traffic_light,
+                "status": precheck.status,
+            },
+        )
         self._audit(
             "ia_documental_preliminar.ai_classification_completed",
             precheck=precheck,
@@ -512,6 +640,45 @@ class DocumentPrecheckService:
         )
         self._audit_terminal(precheck, document=document, actor=actor, previous_state=previous_state, ip_address=ip_address, user_agent=user_agent)
 
+    def _finish_technical_failure(
+        self,
+        precheck: DocumentPrecheck,
+        *,
+        document: Document,
+        code: str,
+        issue_code: str,
+        message: str,
+        actor: User,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> None:
+        logger.exception(
+            "Document precheck technical failure",
+            extra={
+                "case_id": str(precheck.case_id),
+                "document_id": str(document.id),
+                "precheck_id": str(precheck.id),
+                "storage_key": document.storage_key,
+                "error_code": code,
+                "issue_code": issue_code,
+            },
+        )
+        self._finish_without_ai(
+            precheck,
+            document=document,
+            issues=[build_issue(issue_code, metadata={"errorCode": code})],
+            status_value="error",
+            decision="failed",
+            traffic_light="red",
+            summary=message,
+            confidence_score=Decimal("0.0000"),
+            actor=actor,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            error_code=code,
+            error_message=message,
+        )
+
     def _finish_provider_failure(
         self,
         precheck: DocumentPrecheck,
@@ -525,21 +692,32 @@ class DocumentPrecheckService:
         user_agent: str | None,
     ) -> None:
         issue = build_issue(issue_code)
+        logger.exception(
+            "AI provider failure during document precheck",
+            extra={
+                "case_id": str(precheck.case_id),
+                "document_id": str(document.id),
+                "precheck_id": str(precheck.id),
+                "storage_key": document.storage_key,
+                "error_code": code,
+                "issue_code": issue_code,
+            },
+        )
         self._finish_without_ai(
             precheck,
             document=document,
             issues=[issue],
-            status_value="requires_review",
-            decision="requires_human_review",
-            traffic_light="gray",
+            status_value="error",
+            decision="failed",
+            traffic_light="red",
             summary=message,
             confidence_score=Decimal("0.0000"),
             actor=actor,
             ip_address=ip_address,
             user_agent=user_agent,
+            error_code=code,
+            error_message=message,
         )
-        precheck.error_code = code
-        precheck.error_message = message
 
     def _audit_terminal(
         self,
@@ -593,19 +771,6 @@ class DocumentPrecheckService:
                 code="DOCUMENT_NOT_FOUND",
                 message="El documento no esta disponible para prechequeo.",
             )
-        try:
-            if not self.storage.exists(document.storage_key):
-                raise ApiError(
-                    status_code=status.HTTP_409_CONFLICT,
-                    code="DOCUMENT_NOT_FOUND",
-                    message="El archivo del documento no esta disponible.",
-                )
-        except StorageProviderError as exc:
-            raise ApiError(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                code="STORAGE_PROVIDER_ERROR",
-                message="No fue posible verificar el archivo almacenado.",
-            ) from exc
 
     def _require_sensitive_consent(self, user: User) -> None:
         permission = ConsentComplianceService(self.db).can_upload_documents(user.id)
@@ -860,6 +1025,7 @@ def _decision_from_result(
             "pdf_corrupted",
             "no_text_detected",
             "ocr_low_confidence",
+            "ocr_provider_not_configured",
         }
         if any(issue["code"] in reupload_codes for issue in issues):
             return "requires_reupload"
@@ -914,6 +1080,10 @@ def _dedupe_issues(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(key)
         deduped.append(issue)
     return deduped
+
+
+def _ocr_characters(ocr_job: OcrJob) -> int:
+    return sum(len(page.text_preview or "") for page in ocr_job.pages)
 
 
 def _float(value) -> float | None:

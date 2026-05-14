@@ -43,6 +43,7 @@ from app.models.document_precheck import (
 )
 from app.models.user import User
 from app.services.ai_provider import (
+    AiProviderError,
     AiInvalidResponseError,
     MockAiProvider,
     OpenAiCompatibleProvider,
@@ -51,7 +52,7 @@ from app.services.consent_service import (
     REQUIRED_CONSENT_TYPES,
     calculate_document_hash,
 )
-from app.services.document_storage_service import DocumentStorageService
+from app.services.document_storage_service import DocumentStorageService, StorageProviderError
 from app.utils.dates import utc_now
 
 
@@ -237,6 +238,93 @@ def test_document_precheck_corrupted_pdf_generates_critical_issue(client_and_ses
     assert data["issues"][0]["severity"] == "critical"
 
 
+def test_document_precheck_valid_pdf_with_observations_returns_yellow(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    document_id = _create_document_row(
+        session_factory,
+        user_id=user_id,
+        case_id=UUID(case_id),
+        content=_low_density_labor_pdf(),
+    )
+
+    response = client.post(
+        f"/api/v1/cases/{case_id}/document-precheck",
+        json={"documentId": document_id},
+        headers=headers,
+    )
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["decision"] == "suitable_with_observations"
+    assert data["trafficLight"] == "yellow"
+    assert 0 < data["confidenceScore"] < 0.85
+    assert data["ocr"]["textDetected"] is True
+
+
+def test_document_precheck_textless_pdf_requires_reupload(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    document_id = _create_document_row(
+        session_factory,
+        user_id=user_id,
+        case_id=UUID(case_id),
+        content=_textless_pdf(),
+    )
+
+    response = client.post(
+        f"/api/v1/cases/{case_id}/document-precheck",
+        json={"documentId": document_id},
+        headers=headers,
+    )
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "blocked"
+    assert data["decision"] == "requires_reupload"
+    assert data["trafficLight"] == "red"
+    assert data["confidenceScore"] == 0
+    assert data["ocr"]["textDetected"] is False
+    assert {issue["code"] for issue in data["issues"]} >= {"no_text_detected", "ocr_provider_not_configured"}
+
+
+def test_document_precheck_storage_read_error_is_technical_failure(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    document_id = _create_document_row(
+        session_factory,
+        user_id=user_id,
+        case_id=UUID(case_id),
+        content=_labor_history_pdf(),
+    )
+
+    def fail_read(self, storage_key):
+        raise StorageProviderError("MinIO no disponible.")
+
+    monkeypatch.setattr(DocumentStorageService, "read", fail_read)
+
+    response = client.post(
+        f"/api/v1/cases/{case_id}/document-precheck",
+        json={"documentId": document_id},
+        headers=headers,
+    )
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "error"
+    assert data["decision"] == "failed"
+    assert data["trafficLight"] == "red"
+    assert data["issues"][0]["code"] == "storage_read_error"
+    assert data["confidenceScore"] == 0
+
+
 def test_ocr_preview_endpoint_returns_page_preview(client_and_session) -> None:
     client, session_factory = client_and_session
     user_id, headers = _create_user(session_factory)
@@ -263,7 +351,60 @@ def test_ocr_preview_endpoint_returns_page_preview(client_and_session) -> None:
     assert fetched.json()["pages"][0]["textPreview"]
 
 
-def test_invalid_ai_response_marks_precheck_for_review(client_and_session, monkeypatch) -> None:
+def test_ocr_preview_get_generates_preview_if_missing(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    document_id = _create_document_row(
+        session_factory,
+        user_id=user_id,
+        case_id=UUID(case_id),
+        content=_labor_history_pdf(),
+    )
+
+    fetched = client.get(f"/api/v1/documents/{document_id}/ocr-preview", headers=headers)
+
+    assert fetched.status_code == 200
+    payload = fetched.json()
+    assert payload["status"] == "completed"
+    assert payload["pagesTotal"] == 1
+    assert payload["pagesProcessed"] == 1
+    assert payload["textDetected"] is True
+    assert payload["pages"][0]["textPreview"]
+
+
+def test_latest_precheck_response_includes_ocr_pages_for_document_filter(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    document_id = _create_document_row(
+        session_factory,
+        user_id=user_id,
+        case_id=UUID(case_id),
+        content=_labor_history_pdf(),
+    )
+    created = client.post(
+        f"/api/v1/cases/{case_id}/document-precheck",
+        json={"documentId": document_id},
+        headers=headers,
+    )
+    assert created.status_code == 202
+
+    response = client.get(
+        f"/api/v1/cases/{case_id}/document-precheck",
+        params={"documentId": document_id, "latest": True},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["ocr"]["status"] == "completed"
+    assert item["ocr"]["pages"][0]["textPreview"]
+
+
+def test_invalid_ai_response_marks_precheck_as_error(client_and_session, monkeypatch) -> None:
     client, session_factory = client_and_session
     user_id, headers = _create_user(session_factory)
     _grant_required_consents(session_factory, user_id)
@@ -295,9 +436,72 @@ def test_invalid_ai_response_marks_precheck_for_review(client_and_session, monke
 
     assert response.status_code == 202
     data = response.json()
+    assert data["status"] == "error"
+    assert data["decision"] == "failed"
+    assert data["trafficLight"] == "red"
+    assert data["issues"][0]["code"] == "provider_invalid_json"
+
+
+def test_ai_provider_error_marks_precheck_as_error(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    document_id = _create_document_row(
+        session_factory,
+        user_id=user_id,
+        case_id=UUID(case_id),
+        content=_labor_history_pdf(),
+    )
+
+    class FailingProvider:
+        def classify_document(self, input_payload):
+            raise AiProviderError("AI_PROVIDER_NOT_CONFIGURED", "Falta AI_API_KEY.")
+
+    monkeypatch.setattr(
+        "app.services.document_precheck_service.ai_provider_factory",
+        lambda: FailingProvider(),
+    )
+
+    response = client.post(
+        f"/api/v1/cases/{case_id}/document-precheck",
+        json={"documentId": document_id},
+        headers=headers,
+    )
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "error"
+    assert data["decision"] == "failed"
+    assert data["trafficLight"] == "red"
+    assert data["issues"][0]["code"] == "ai_provider_not_configured"
+
+
+def test_ambiguous_document_requires_human_review_with_yellow_light(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    document_id = _create_document_row(
+        session_factory,
+        user_id=user_id,
+        case_id=UUID(case_id),
+        content=_ambiguous_labor_pdf(),
+    )
+
+    response = client.post(
+        f"/api/v1/cases/{case_id}/document-precheck",
+        json={"documentId": document_id},
+        headers=headers,
+    )
+
+    assert response.status_code == 202
+    data = response.json()
     assert data["status"] == "requires_review"
     assert data["decision"] == "requires_human_review"
-    assert data["issues"][0]["code"] == "provider_invalid_json"
+    assert data["trafficLight"] == "yellow"
+    assert data["confidenceScore"] > 0
+    assert data["issues"][0]["code"] == "human_review_required"
 
 
 def test_mock_ai_provider_is_deterministic() -> None:
@@ -557,4 +761,34 @@ def _labor_history_pdf() -> bytes:
         b"1 0 obj <</Type /Catalog>> endobj\n"
         b"2 0 obj <</Type /Page>> endobj\n"
         b"historia laboral semanas cotizadas colpensiones periodos laborales empleador salario\n%%EOF"
+    )
+
+
+def _low_density_labor_pdf() -> bytes:
+    return (
+        b"%PDF-1.4\n"
+        b"1 0 obj <</Type /Catalog>> endobj\n"
+        b"2 0 obj <</Type /Page>> endobj\n"
+        b"historia laboral semanas cotizadas "
+        + (b". " * 120)
+        + b"\n%%EOF"
+    )
+
+
+def _textless_pdf() -> bytes:
+    return (
+        b"%PDF-1.4\n"
+        b"1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj\n"
+        b"2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>> endobj\n"
+        b"3 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>> endobj\n"
+        b"xref\ntrailer\n%%EOF"
+    )
+
+
+def _ambiguous_labor_pdf() -> bytes:
+    return (
+        b"%PDF-1.4\n"
+        b"1 0 obj <</Type /Catalog>> endobj\n"
+        b"2 0 obj <</Type /Page>> endobj\n"
+        b"documento pensional del trabajador con informacion incompleta para validar automaticamente\n%%EOF"
     )

@@ -15,6 +15,7 @@ bcrypt<4.1
 google-auth
 requests
 minio
+pypdf
 
 pytest
 httpx

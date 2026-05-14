@@ -113,19 +113,26 @@ class MockAiProvider:
             for page in pages
             if page.get("isBlurry")
         ]
-        is_labor = any(
-            signal in text
-            for signal in [
-                "historia laboral",
-                "semanas",
-                "cotizadas",
-                "colpensiones",
-                "periodos laborales",
-                "certificacion laboral",
-                "resolucion",
-                "nomina",
-            ]
-        )
+        strong_labor_signals = [
+            "historia laboral",
+            "semanas",
+            "cotizadas",
+            "colpensiones",
+            "periodos laborales",
+            "certificacion laboral",
+            "resolucion",
+            "nomina",
+        ]
+        related_signals = [
+            "laboral",
+            "pensional",
+            "pension",
+            "trabajador",
+            "empleador",
+            "afiliacion",
+        ]
+        is_labor = any(signal in text for signal in strong_labor_signals)
+        is_ambiguous_related = not is_labor and any(signal in text for signal in related_signals)
         if not text_detected:
             issues = [build_issue("no_text_detected", severity="critical")]
             output = DocumentClassificationOutput.model_validate(
@@ -139,6 +146,21 @@ class MockAiProvider:
                     "detectedSignals": [],
                     "issues": [_external_issue(issue) for issue in issues],
                     "recommendedNextAction": "upload_better_scan",
+                }
+            )
+        elif is_ambiguous_related:
+            issue = build_issue("human_review_required")
+            output = DocumentClassificationOutput.model_validate(
+                {
+                    "documentType": "otro_soporte_laboral_pensional",
+                    "isLaborOrPensionRelated": True,
+                    "isSuitableForPreanalysis": False,
+                    "trafficLight": "yellow",
+                    "confidenceScore": 0.68,
+                    "summary": "El documento tiene senales laborales o pensionales, pero requiere validacion humana por ambiguedad documental.",
+                    "detectedSignals": _detected_signals(text),
+                    "issues": [_external_issue(issue)],
+                    "recommendedNextAction": "human_review",
                 }
             )
         else:
@@ -186,11 +208,11 @@ class OpenAiCompatibleProvider:
         api_key: str,
     ) -> None:
         if not api_key:
-            raise AiProviderError("AI_PROVIDER_CONFIGURATION_ERROR", "Falta AI_API_KEY.")
+            raise AiProviderError("AI_PROVIDER_NOT_CONFIGURED", "Falta AI_API_KEY.")
         if not base_url:
-            raise AiProviderError("AI_PROVIDER_CONFIGURATION_ERROR", "Falta AI_BASE_URL.")
+            raise AiProviderError("AI_PROVIDER_NOT_CONFIGURED", "Falta AI_BASE_URL.")
         if not model:
-            raise AiProviderError("AI_PROVIDER_CONFIGURATION_ERROR", "Falta AI_MODEL.")
+            raise AiProviderError("AI_PROVIDER_NOT_CONFIGURED", "Falta AI_MODEL.")
         self.provider_name = provider_name
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -255,6 +277,8 @@ class OpenAiCompatibleProvider:
                 )
             except requests.Timeout as exc:
                 raise AiTimeoutError("AI_PROVIDER_TIMEOUT", "El proveedor IA no respondio a tiempo.") from exc
+            except requests.RequestException as exc:
+                raise AiProviderError("AI_PROVIDER_ERROR", "No fue posible comunicarse con el proveedor IA.") from exc
             if response.status_code == 429:
                 raise AiRateLimitedError("AI_PROVIDER_RATE_LIMITED", "El proveedor IA limito la solicitud.")
             if response.status_code >= 500:
@@ -333,7 +357,7 @@ def ai_provider_factory() -> LlmProvider:
             model=settings.ai_model or "kimi-k2.6",
             api_key=settings.ai_api_key,
         )
-    raise AiProviderError("AI_PROVIDER_CONFIGURATION_ERROR", "Proveedor IA no soportado.")
+    raise AiProviderError("AI_PROVIDER_NOT_CONFIGURED", "Proveedor IA no soportado.")
 
 
 def _parse_classification_json(raw_content: str) -> DocumentClassificationOutput:
