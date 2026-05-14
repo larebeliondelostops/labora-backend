@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
     MINIO_PRESIGNED_UPLOAD_TTL_SECONDS: int = 900
 
+    AI_PROVIDER: str = "mock"
+    AI_API_KEY: str = ""
+    AI_BASE_URL: str = ""
+    AI_MODEL: str = ""
+    AI_TIMEOUT_MS: int = 30000
+    AI_MAX_RETRIES: int = 2
+    AI_TEMPERATURE: float = 0
+    AI_JSON_MODE: bool = True
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -275,6 +284,38 @@ class Settings(BaseSettings):
     @property
     def minio_presigned_upload_ttl_seconds(self) -> int:
         return self.MINIO_PRESIGNED_UPLOAD_TTL_SECONDS
+
+    @property
+    def ai_provider(self) -> str:
+        return self.AI_PROVIDER.strip().lower()
+
+    @property
+    def ai_api_key(self) -> str:
+        return self.AI_API_KEY
+
+    @property
+    def ai_base_url(self) -> str:
+        return self.AI_BASE_URL.rstrip("/")
+
+    @property
+    def ai_model(self) -> str:
+        return self.AI_MODEL
+
+    @property
+    def ai_timeout_seconds(self) -> float:
+        return max(self.AI_TIMEOUT_MS, 1) / 1000
+
+    @property
+    def ai_max_retries(self) -> int:
+        return max(self.AI_MAX_RETRIES, 0)
+
+    @property
+    def ai_temperature(self) -> float:
+        return self.AI_TEMPERATURE
+
+    @property
+    def ai_json_mode(self) -> bool:
+        return self.AI_JSON_MODE
 
 
 @lru_cache

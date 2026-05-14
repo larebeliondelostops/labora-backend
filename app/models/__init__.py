@@ -20,6 +20,13 @@ from app.models.document import (
     DocumentValidation,
     FileUpload,
 )
+from app.models.document_precheck import (
+    AiConfidence,
+    DocumentIssue,
+    DocumentPrecheck,
+    OcrJob,
+    OcrPageResult,
+)
 from app.models.external_auth_account import ExternalAuthAccount
 from app.models.faq_item import FaqItem
 from app.models.lead import Lead
@@ -40,9 +47,12 @@ __all__ = [
     "CaseTag",
     "ConsentEvidence",
     "ConsentIdempotencyKey",
+    "AiConfidence",
     "Document",
     "DocumentHash",
+    "DocumentIssue",
     "DocumentPage",
+    "DocumentPrecheck",
     "DocumentType",
     "DocumentValidation",
     "ExternalAuthAccount",
@@ -52,6 +62,8 @@ __all__ = [
     "LegalDocument",
     "LaboraCase",
     "OAuthState",
+    "OcrJob",
+    "OcrPageResult",
     "OTPCode",
     "PasswordResetToken",
     "PublicContent",

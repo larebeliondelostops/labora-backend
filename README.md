@@ -87,6 +87,83 @@ docker compose exec labora-backend pytest
 
 Documentacion del modulo documental: `docs/carga_documental_backend.md`.
 
+## IA documental preliminar
+
+El modulo de IA documental preliminar cubre el tramo `Documentos -> IA
+preliminar -> Validacion -> Resultado preliminar`. No genera conclusiones
+juridicas, liquidaciones, informes finales ni escritos.
+
+Variables de entorno:
+
+```env
+AI_PROVIDER=mock
+AI_API_KEY=
+AI_BASE_URL=
+AI_MODEL=
+AI_TIMEOUT_MS=30000
+AI_MAX_RETRIES=2
+AI_TEMPERATURE=0
+AI_JSON_MODE=true
+```
+
+Proveedores soportados:
+
+```env
+# DeepSeek
+AI_PROVIDER=deepseek
+AI_BASE_URL=https://api.deepseek.com
+AI_MODEL=deepseek-v4-pro
+AI_API_KEY=replace_with_key
+
+# Kimi / Moonshot
+AI_PROVIDER=kimi
+AI_BASE_URL=https://api.moonshot.ai/v1
+AI_MODEL=kimi-k2.6
+AI_API_KEY=replace_with_key
+
+# Local / CI
+AI_PROVIDER=mock
+```
+
+Endpoints:
+
+- `POST /api/v1/cases/{caseId}/document-precheck`
+- `GET /api/v1/cases/{caseId}/document-precheck`
+- `GET /api/v1/cases/{caseId}/document-precheck/{precheckId}`
+- `POST /api/v1/documents/{documentId}/ocr-preview`
+- `GET /api/v1/documents/{documentId}/ocr-preview`
+- `POST /api/v1/admin/document-precheck/{precheckId}/review`
+
+Ejemplo:
+
+```sh
+curl -X POST "$API_URL/api/v1/cases/$CASE_ID/document-precheck" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"documentId":"'$DOCUMENT_ID'","force":false}'
+```
+
+El job corre inline en este MVP, usando una interfaz separada para moverlo luego a
+worker/cola. Para aplicar las tablas nuevas:
+
+```sh
+alembic upgrade head
+```
+
+Eventos auditados principales:
+
+- `ia_documental_preliminar.created`
+- `ia_documental_preliminar.queued`
+- `ia_documental_preliminar.started`
+- `ia_documental_preliminar.ocr_preview_started`
+- `ia_documental_preliminar.ocr_preview_completed`
+- `ia_documental_preliminar.ai_classification_started`
+- `ia_documental_preliminar.ai_classification_completed`
+- `ia_documental_preliminar.completed`
+- `ia_documental_preliminar.requires_review`
+- `ia_documental_preliminar.blocked`
+- `ia_documental_preliminar.manual_reviewed`
+
 ## Modulo cuenta y autenticacion
 
 Variables principales:
