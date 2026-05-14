@@ -7,7 +7,7 @@ from app.models.document import Document
 from app.models.user import User
 from app.repositories.document_repository import DocumentRepository
 from app.services.document_audit_service import DocumentAuditService
-from app.services.document_storage_service import DocumentStorageService
+from app.services.document_storage_service import DocumentStorageService, StorageProviderError
 from app.utils.dates import utc_now
 from app.utils.hashing import sha256_bytes
 
@@ -43,7 +43,7 @@ class DocumentValidationService:
 
         try:
             content = self.storage.read(document.storage_key)
-        except OSError:
+        except (OSError, StorageProviderError):
             return self._fail_validation(
                 document,
                 actor=actor,

@@ -1,53 +1,273 @@
 import hashlib
 import hmac
 import time
+from collections.abc import Iterator
+from datetime import timedelta
+from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.core.config import settings
 
 
-class DocumentStorageService:
-    bucket_name = "documents"
+class StorageProviderError(Exception):
+    pass
 
-    def __init__(self, root_path: str | None = None) -> None:
+
+class DocumentStorageService:
+    local_bucket_name = "documents"
+
+    def __init__(
+        self,
+        root_path: str | None = None,
+        *,
+        backend: str | None = None,
+        minio_client=None,
+        minio_public_client=None,
+    ) -> None:
+        self.backend = (backend or settings.storage_backend).strip().lower()
+        if self.backend not in {"local", "minio"}:
+            raise StorageProviderError("Backend de almacenamiento no soportado.")
+        self.bucket_name = (
+            settings.minio_bucket if self.backend == "minio" else self.local_bucket_name
+        )
         self.root_path = _storage_root(root_path or settings.local_storage_path)
+        self._minio_client = minio_client
+        self._minio_public_client = minio_public_client
+
+    @property
+    def is_local(self) -> bool:
+        return self.backend == "local"
+
+    @property
+    def is_minio(self) -> bool:
+        return self.backend == "minio"
 
     def build_storage_key(self, *, case_id: str, document_id: str, filename: str) -> str:
         return f"{case_id}/{document_id}/{filename}"
 
-    def save(self, *, storage_key: str, content: bytes) -> None:
+    def save(
+        self,
+        *,
+        storage_key: str,
+        content: bytes,
+        content_type: str | None = None,
+    ) -> None:
+        if self.is_minio:
+            try:
+                self._internal_client().put_object(
+                    self.bucket_name,
+                    storage_key,
+                    BytesIO(content),
+                    length=len(content),
+                    content_type=content_type or "application/octet-stream",
+                )
+            except Exception as exc:
+                raise StorageProviderError("No fue posible guardar el archivo en MinIO.") from exc
+            return
+
         path = self.path_for_key(storage_key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 
     def exists(self, storage_key: str) -> bool:
+        if self.is_minio:
+            try:
+                self.stat_object(storage_key)
+            except FileNotFoundError:
+                return False
+            return True
         return self.path_for_key(storage_key).exists()
 
+    def stat_object(self, storage_key: str):
+        if self.is_minio:
+            try:
+                return self._internal_client().stat_object(self.bucket_name, storage_key)
+            except Exception as exc:
+                if _is_minio_not_found(exc):
+                    raise FileNotFoundError(storage_key) from exc
+                raise StorageProviderError("No fue posible verificar el archivo en MinIO.") from exc
+        path = self.path_for_key(storage_key)
+        if not path.exists():
+            raise FileNotFoundError(storage_key)
+        return path.stat()
+
     def read(self, storage_key: str) -> bytes:
+        if self.is_minio:
+            response = None
+            try:
+                response = self._internal_client().get_object(self.bucket_name, storage_key)
+                return response.read()
+            except Exception as exc:
+                if _is_minio_not_found(exc):
+                    raise FileNotFoundError(storage_key) from exc
+                raise StorageProviderError("No fue posible leer el archivo desde MinIO.") from exc
+            finally:
+                _close_minio_response(response)
         return self.path_for_key(storage_key).read_bytes()
+
+    def stream(self, storage_key: str, *, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+        if self.is_minio:
+            try:
+                response = self._internal_client().get_object(self.bucket_name, storage_key)
+            except Exception as exc:
+                if _is_minio_not_found(exc):
+                    raise FileNotFoundError(storage_key) from exc
+                raise StorageProviderError("No fue posible leer el archivo desde MinIO.") from exc
+
+            def minio_iterator() -> Iterator[bytes]:
+                try:
+                    for chunk in response.stream(chunk_size):
+                        if chunk:
+                            yield chunk
+                finally:
+                    _close_minio_response(response)
+
+            return minio_iterator()
+
+        path = self.path_for_key(storage_key)
+        if not path.exists():
+            raise FileNotFoundError(storage_key)
+
+        def local_iterator() -> Iterator[bytes]:
+            with path.open("rb") as file:
+                while chunk := file.read(chunk_size):
+                    yield chunk
+
+        return local_iterator()
 
     def path_for_key(self, storage_key: str) -> Path:
         clean_parts = [part for part in storage_key.replace("\\", "/").split("/") if part]
         return self.root_path.joinpath(self.bucket_name, *clean_parts)
 
-    def signed_view_url(self, *, document_id: str, expires_in_seconds: int = 300) -> str:
-        expires = int(time.time()) + expires_in_seconds
-        signature = self._signature(document_id=document_id, expires=expires)
+    def signed_upload_url(
+        self,
+        *,
+        document_id: str,
+        storage_key: str,
+        expires_in_seconds: int | None = None,
+    ) -> str:
+        ttl_seconds = expires_in_seconds or settings.minio_presigned_upload_ttl_seconds
+        if self.is_minio:
+            try:
+                return self._public_client().presigned_put_object(
+                    self.bucket_name,
+                    storage_key,
+                    expires=timedelta(seconds=ttl_seconds),
+                )
+            except Exception as exc:
+                raise StorageProviderError("No fue posible generar la URL de subida.") from exc
+
+        expires = int(time.time()) + ttl_seconds
+        signature = self._signature(
+            document_id=document_id,
+            expires=expires,
+            action="upload",
+        )
         return (
-            f"{settings.api_v1_prefix}/documents/{document_id}/file"
+            f"{_backend_url()}{settings.api_v1_prefix}/documents/{document_id}/upload"
             f"?expires={expires}&token={signature}"
         )
 
-    def validate_token(self, *, document_id: str, expires: int, token: str) -> bool:
+    def signed_view_url(self, *, document_id: str, expires_in_seconds: int = 300) -> str:
+        expires = int(time.time()) + expires_in_seconds
+        signature = self._signature(
+            document_id=document_id,
+            expires=expires,
+            action="view",
+        )
+        return (
+            f"{_backend_url()}{settings.api_v1_prefix}/documents/{document_id}/file"
+            f"?expires={expires}&token={signature}"
+        )
+
+    def validate_token(
+        self,
+        *,
+        document_id: str,
+        expires: int,
+        token: str,
+        action: str = "view",
+    ) -> bool:
         if expires < int(time.time()):
             return False
-        expected = self._signature(document_id=document_id, expires=expires)
+        expected = self._signature(
+            document_id=document_id,
+            expires=expires,
+            action=action,
+        )
         return hmac.compare_digest(expected, token)
 
-    def _signature(self, *, document_id: str, expires: int) -> str:
+    def _signature(self, *, document_id: str, expires: int, action: str) -> str:
         secret = settings.jwt_access_secret.encode("utf-8")
-        payload = f"{document_id}:{expires}".encode("utf-8")
+        payload = f"{action}:{document_id}:{expires}".encode("utf-8")
         return hmac.new(secret, payload, hashlib.sha256).hexdigest()
+
+    def _internal_client(self):
+        if self._minio_client is None:
+            self._minio_client = self._build_minio_client(settings.minio_endpoint)
+        return self._minio_client
+
+    def _public_client(self):
+        if self._minio_public_client is None:
+            self._minio_public_client = self._build_minio_client(
+                settings.minio_public_endpoint,
+            )
+        return self._minio_public_client
+
+    def _build_minio_client(self, raw_endpoint: str):
+        Minio = _load_minio_client_class()
+        endpoint, secure = _normalize_minio_endpoint(
+            raw_endpoint,
+            default_secure=settings.minio_secure,
+        )
+        return Minio(
+            endpoint,
+            access_key=settings.minio_access_key,
+            secret_key=settings.minio_secret_key,
+            secure=secure,
+        )
+
+
+def _load_minio_client_class():
+    try:
+        from minio import Minio
+    except ImportError as exc:
+        raise StorageProviderError("El paquete minio no esta instalado.") from exc
+    return Minio
+
+
+def _normalize_minio_endpoint(raw_endpoint: str, *, default_secure: bool) -> tuple[str, bool]:
+    endpoint = raw_endpoint.strip()
+    if "://" not in endpoint:
+        return endpoint, default_secure
+
+    parsed = urlsplit(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise StorageProviderError("Endpoint de MinIO invalido.")
+    return parsed.netloc, parsed.scheme == "https"
+
+
+def _is_minio_not_found(exc: Exception) -> bool:
+    code = getattr(exc, "code", None)
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status", None)
+    return code in {"NoSuchBucket", "NoSuchKey", "NoSuchObject", "NotFound"} or status == 404
+
+
+def _close_minio_response(response) -> None:
+    if response is None:
+        return
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
+    release_conn = getattr(response, "release_conn", None)
+    if callable(release_conn):
+        release_conn()
+
+
+def _backend_url() -> str:
+    return settings.backend_public_url
 
 
 def _storage_root(raw_path: str) -> Path:

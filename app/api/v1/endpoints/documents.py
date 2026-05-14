@@ -1,8 +1,8 @@
 import re
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,7 @@ from app.schemas.document import (
     DocumentViewUrlResponse,
 )
 from app.services.document_service import DocumentService
+from app.services.document_storage_service import StorageProviderError
 
 router = APIRouter()
 
@@ -148,6 +149,25 @@ def get_document_view_url(
     )
 
 
+@router.put("/documents/{document_id}/upload", status_code=status.HTTP_204_NO_CONTENT)
+async def upload_document_file(
+    document_id: str,
+    request: Request,
+    expires: int,
+    token: str,
+    db: Session = Depends(get_db),
+) -> Response:
+    content = await request.body()
+    DocumentService(db).save_signed_upload(
+        document_id,
+        content=content,
+        content_type=request.headers.get("content-type"),
+        expires=expires,
+        token=token,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/documents/{document_id}/file")
 def get_document_file(
     document_id: str,
@@ -156,9 +176,10 @@ def get_document_file(
     token: str,
     context=Depends(get_current_user_context),
     db: Session = Depends(get_db),
-) -> FileResponse:
+) -> Response:
     user, _payload = context
-    path = DocumentService(db).validate_file_access(
+    service = DocumentService(db)
+    document = service.validate_file_access(
         document_id,
         expires=expires,
         token=token,
@@ -166,13 +187,41 @@ def get_document_file(
         ip_address=get_client_ip(request),
         user_agent=get_user_agent(request),
     )
-    if not path.exists():
+    if service.storage.is_local:
+        path = service.storage.path_for_key(document.storage_key)
+        if not path.exists():
+            raise ApiError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="DOCUMENT_NOT_FOUND",
+                message="Archivo no encontrado.",
+            )
+        return FileResponse(
+            path,
+            media_type=document.mime_type,
+            filename=document.original_filename,
+        )
+
+    try:
+        stream = service.storage.stream(document.storage_key)
+    except FileNotFoundError as exc:
         raise ApiError(
             status_code=status.HTTP_404_NOT_FOUND,
             code="DOCUMENT_NOT_FOUND",
             message="Archivo no encontrado.",
-        )
-    return FileResponse(path)
+        ) from exc
+    except StorageProviderError as exc:
+        raise ApiError(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code="STORAGE_PROVIDER_ERROR",
+            message="No fue posible leer el archivo desde el almacenamiento.",
+        ) from exc
+    return StreamingResponse(
+        stream,
+        media_type=document.mime_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{_header_filename(document.original_filename)}"',
+        },
+    )
 
 
 @router.patch("/documents/{document_id}")
@@ -338,6 +387,10 @@ def _parse_bool(value: str | None) -> bool:
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on", "si", "sí"}
+
+
+def _header_filename(filename: str) -> str:
+    return filename.replace("\\", "_").replace("/", "_").replace('"', "_")
 
 
 def _payload_error(message: str) -> ApiError:

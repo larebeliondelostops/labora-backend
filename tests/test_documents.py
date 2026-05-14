@@ -8,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import settings
 from app.core.database import Base, get_db
 from app.core.security import create_access_token
 from app.main import app
@@ -38,6 +39,7 @@ from app.services.consent_service import (
     REQUIRED_CONSENT_TYPES,
     calculate_document_hash,
 )
+from app.services.document_storage_service import DocumentStorageService
 from app.utils.dates import utc_now
 
 
@@ -71,7 +73,13 @@ TITLES = {
 
 
 @pytest.fixture()
-def client_and_session():
+def client_and_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
+    monkeypatch.setattr(settings, "LOCAL_STORAGE_PATH", str(tmp_path / "storage"))
+    monkeypatch.setattr(settings, "BACKEND_PUBLIC_URL", "http://localhost:8000")
+    monkeypatch.setattr(settings, "MINIO_BUCKET", "documents")
+    monkeypatch.setattr(settings, "MINIO_PRESIGNED_UPLOAD_TTL_SECONDS", 900)
+
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -142,6 +150,9 @@ def test_document_types_and_multipart_upload_flow(client_and_session) -> None:
     view_url = client.get(f"/api/v1/documents/{document_id}/view-url", headers=headers)
     assert view_url.status_code == 200
     assert view_url.json()["expiresInSeconds"] == 300
+    assert view_url.json()["url"].startswith(
+        f"http://localhost:8000/api/v1/documents/{document_id}/file"
+    )
 
     readiness = client.get(f"/api/v1/cases/{case_id}/document-readiness", headers=headers)
     assert readiness.status_code == 200
@@ -310,6 +321,104 @@ def test_upload_rejects_bad_type_size_and_corrupted_content(client_and_session) 
     assert corrupted.json()["error"]["code"] == "DOCUMENT_CORRUPTED"
 
 
+def test_signed_url_upload_payload_uses_minio_put_url(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    _use_fake_minio(monkeypatch, object_exists=False)
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case(client, headers)
+
+    created = client.post(
+        f"/api/v1/cases/{case_id}/documents",
+        headers=headers,
+        json={
+            "originalFilename": "historia-laboral.pdf",
+            "mimeType": "application/pdf",
+            "sizeBytes": len(_labor_history_pdf()),
+            "documentTypeCode": "historia_laboral",
+            "isPrimary": True,
+        },
+    )
+
+    assert created.status_code == 201
+    upload = created.json()["upload"]
+    assert upload["method"] == "signed_url"
+    assert upload["status"] == "initiated"
+    assert upload["uploadUrl"].startswith("http://localhost:9000/documents/")
+    assert "/file" not in upload["uploadUrl"]
+    assert upload["headers"] == {"Content-Type": "application/pdf"}
+
+
+def test_complete_upload_fails_when_minio_object_is_missing(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    _use_fake_minio(monkeypatch, object_exists=False)
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case(client, headers)
+    created = client.post(
+        f"/api/v1/cases/{case_id}/documents",
+        headers=headers,
+        json={
+            "originalFilename": "historia-laboral.pdf",
+            "mimeType": "application/pdf",
+            "sizeBytes": len(_labor_history_pdf()),
+            "documentTypeCode": "historia_laboral",
+            "isPrimary": True,
+        },
+    )
+    assert created.status_code == 201
+    document_id = created.json()["document"]["id"]
+
+    completed = client.post(
+        f"/api/v1/documents/{document_id}/complete-upload",
+        headers=headers,
+    )
+
+    assert completed.status_code == 409
+    assert completed.json()["error"]["code"] == "STORAGE_PROVIDER_ERROR"
+    db = session_factory()
+    try:
+        upload = db.query(FileUpload).filter(FileUpload.document_id == UUID(document_id)).one()
+        assert upload.status == "failed"
+        assert upload.error_code == "STORAGE_PROVIDER_ERROR"
+    finally:
+        db.close()
+
+
+def test_complete_upload_reads_private_minio_object(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    _use_fake_minio(monkeypatch, object_exists=True, content=_labor_history_pdf())
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case(client, headers)
+    created = client.post(
+        f"/api/v1/cases/{case_id}/documents",
+        headers=headers,
+        json={
+            "originalFilename": "historia-laboral.pdf",
+            "mimeType": "application/pdf",
+            "sizeBytes": len(_labor_history_pdf()),
+            "documentTypeCode": "historia_laboral",
+            "isPrimary": True,
+        },
+    )
+    assert created.status_code == 201
+    document_id = created.json()["document"]["id"]
+
+    completed = client.post(
+        f"/api/v1/documents/{document_id}/complete-upload",
+        headers=headers,
+    )
+
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "validated"
+    assert completed.json()["validationStatus"] == "completed"
+    assert {job["type"] for job in completed.json()["jobs"]} == {
+        "document_validation",
+        "document_classification",
+    }
+
+
 def _create_user(session_factory, *, role: str = "user"):
     db = session_factory()
     try:
@@ -473,6 +582,69 @@ def _support_pdf() -> bytes:
         b"1 0 obj <</Type /Catalog>> endobj\n"
         b"2 0 obj <</Type /Page>> endobj\n"
         b"certificacion laboral empleador salario cargo\n%%EOF"
+    )
+
+
+def _use_fake_minio(
+    monkeypatch,
+    *,
+    object_exists: bool,
+    content: bytes = b"",
+) -> None:
+    monkeypatch.setattr(settings, "STORAGE_BACKEND", "minio")
+    monkeypatch.setattr(settings, "MINIO_ENDPOINT", "labora-minio:9000")
+    monkeypatch.setattr(settings, "MINIO_PUBLIC_ENDPOINT", "localhost:9000")
+    monkeypatch.setattr(settings, "MINIO_ACCESS_KEY", "labora_minio")
+    monkeypatch.setattr(settings, "MINIO_SECRET_KEY", "labora_minio_password")
+    monkeypatch.setattr(settings, "MINIO_BUCKET", "documents")
+    monkeypatch.setattr(settings, "MINIO_SECURE", False)
+    monkeypatch.setattr(settings, "MINIO_PRESIGNED_UPLOAD_TTL_SECONDS", 900)
+
+    class FakeMissingObjectError(Exception):
+        code = "NoSuchKey"
+
+    class FakeMinioResponse:
+        def __init__(self, response_content: bytes) -> None:
+            self.response_content = response_content
+
+        def read(self):
+            return self.response_content
+
+        def stream(self, chunk_size):
+            for index in range(0, len(self.response_content), chunk_size):
+                yield self.response_content[index : index + chunk_size]
+
+        def close(self):
+            return None
+
+        def release_conn(self):
+            return None
+
+    class FakeMinioClient:
+        def __init__(self, endpoint: str) -> None:
+            self.endpoint = endpoint
+
+        def presigned_put_object(self, bucket_name, object_name, expires):
+            assert bucket_name == "documents"
+            assert expires.total_seconds() == 900
+            return f"http://{self.endpoint}/{bucket_name}/{object_name}?X-Amz-Signature=fake"
+
+        def stat_object(self, bucket_name, object_name):
+            assert bucket_name == "documents"
+            if object_exists:
+                return {"object_name": object_name}
+            raise FakeMissingObjectError()
+
+        def get_object(self, bucket_name, object_name):
+            assert bucket_name == "documents"
+            if object_exists:
+                return FakeMinioResponse(content)
+            raise FakeMissingObjectError()
+
+    monkeypatch.setattr(
+        DocumentStorageService,
+        "_build_minio_client",
+        lambda self, raw_endpoint: FakeMinioClient(raw_endpoint),
     )
 
 

@@ -13,7 +13,12 @@ services:
       - .:/app
       - labora_storage:/app/storage
     depends_on:
-      - labora-postgres
+      labora-postgres:
+        condition: service_started
+      labora-minio:
+        condition: service_started
+      labora-minio-init:
+        condition: service_completed_successfully
     networks:
       - labora-network
 
@@ -32,9 +37,63 @@ services:
     networks:
       - labora-network
 
+  labora-minio:
+    image: minio/minio
+    container_name: labora-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-labora_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-labora_minio_password}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - labora_minio_data:/data
+    networks:
+      - labora-network
+
+  labora-minio-init:
+    image: minio/mc
+    container_name: labora-minio-init
+    depends_on:
+      - labora-minio
+    env_file:
+      - .env
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-labora_minio}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-labora_minio_password}
+      MINIO_BUCKET: ${MINIO_BUCKET:-documents}
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      set -e
+      until mc alias set labora http://labora-minio:9000 "$${MINIO_ACCESS_KEY}" "$${MINIO_SECRET_KEY}"; do
+        sleep 2
+      done
+      mc mb --ignore-existing "labora/$${MINIO_BUCKET}"
+      mc anonymous set none "labora/$${MINIO_BUCKET}"
+      cat > /tmp/cors.xml <<'EOF'
+      <CORSConfiguration>
+        <CORSRule>
+          <AllowedOrigin>http://localhost:3000</AllowedOrigin>
+          <AllowedMethod>GET</AllowedMethod>
+          <AllowedMethod>PUT</AllowedMethod>
+          <AllowedMethod>POST</AllowedMethod>
+          <AllowedMethod>HEAD</AllowedMethod>
+          <AllowedHeader>*</AllowedHeader>
+          <ExposeHeader>ETag</ExposeHeader>
+          <MaxAgeSeconds>3600</MaxAgeSeconds>
+        </CORSRule>
+      </CORSConfiguration>
+      EOF
+      mc cors set "labora/$${MINIO_BUCKET}" /tmp/cors.xml
+    networks:
+      - labora-network
+
 volumes:
   labora_postgres_data:
   labora_storage:
+  labora_minio_data:
 
 networks:
   labora-network:

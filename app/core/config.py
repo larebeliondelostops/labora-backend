@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     CORS_ALLOW_CREDENTIALS: bool = True
 
     FRONTEND_URL: str = "http://localhost:3000"
+    BACKEND_PUBLIC_URL: str = "http://localhost:8000"
 
     AUTH_COOKIE_NAME: str = "labora_access_token"
     AUTH_COOKIE_SECURE: bool = False
@@ -56,6 +57,14 @@ class Settings(BaseSettings):
 
     LOCAL_STORAGE_PATH: str = "/app/storage"
     MAX_UPLOAD_SIZE_MB: int = 25
+    STORAGE_BACKEND: str = "local"
+    MINIO_ENDPOINT: str = "labora-minio:9000"
+    MINIO_PUBLIC_ENDPOINT: str = "localhost:9000"
+    MINIO_ACCESS_KEY: str = "labora_minio"
+    MINIO_SECRET_KEY: str = "labora_minio_password"
+    MINIO_BUCKET: str = "documents"
+    MINIO_SECURE: bool = False
+    MINIO_PRESIGNED_UPLOAD_TTL_SECONDS: int = 900
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -147,6 +156,10 @@ class Settings(BaseSettings):
         return (self.APP_FRONTEND_URL or self.FRONTEND_URL).rstrip("/")
 
     @property
+    def backend_public_url(self) -> str:
+        return self.BACKEND_PUBLIC_URL.rstrip("/")
+
+    @property
     def email_provider(self) -> str:
         return self.EMAIL_PROVIDER.lower()
 
@@ -225,6 +238,38 @@ class Settings(BaseSettings):
     @property
     def max_upload_size_mb(self) -> int:
         return self.MAX_UPLOAD_SIZE_MB
+
+    @property
+    def storage_backend(self) -> str:
+        return self.STORAGE_BACKEND.strip().lower()
+
+    @property
+    def minio_endpoint(self) -> str:
+        return self.MINIO_ENDPOINT
+
+    @property
+    def minio_public_endpoint(self) -> str:
+        return self.MINIO_PUBLIC_ENDPOINT
+
+    @property
+    def minio_access_key(self) -> str:
+        return self.MINIO_ACCESS_KEY
+
+    @property
+    def minio_secret_key(self) -> str:
+        return self.MINIO_SECRET_KEY
+
+    @property
+    def minio_bucket(self) -> str:
+        return self.MINIO_BUCKET
+
+    @property
+    def minio_secure(self) -> bool:
+        return self.MINIO_SECURE
+
+    @property
+    def minio_presigned_upload_ttl_seconds(self) -> int:
+        return self.MINIO_PRESIGNED_UPLOAD_TTL_SECONDS
 
 
 @lru_cache

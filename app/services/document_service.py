@@ -10,8 +10,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.api_errors import ApiError
+from app.core.config import settings
 from app.models.case import LaboraCase
-from app.models.document import Document, DocumentType
+from app.models.document import Document, DocumentType, FileUpload
 from app.models.user import User
 from app.repositories.case_repository import CaseRepository
 from app.repositories.document_repository import DocumentRepository
@@ -19,7 +20,7 @@ from app.schemas.document import DocumentCreateRequest, DocumentReplaceRequest, 
 from app.services.consent_service import ConsentComplianceService
 from app.services.document_audit_service import DocumentAuditService
 from app.services.document_job_queue import DocumentJobQueue
-from app.services.document_storage_service import DocumentStorageService
+from app.services.document_storage_service import DocumentStorageService, StorageProviderError
 from app.utils.dates import utc_now
 
 
@@ -267,7 +268,9 @@ class DocumentService:
             mime_type=payload.mime_type,
             size_bytes=payload.size_bytes,
             storage_key=storage_key,
-            expires_at=now + timedelta(minutes=15)
+            expires_at=now + timedelta(
+                seconds=settings.minio_presigned_upload_ttl_seconds,
+            )
             if file_content is None
             else None,
             completed_at=now if file_content is not None else None,
@@ -290,7 +293,19 @@ class DocumentService:
 
         jobs: list[dict] = []
         if file_content is not None:
-            self.storage.save(storage_key=storage_key, content=file_content)
+            try:
+                self.storage.save(
+                    storage_key=storage_key,
+                    content=file_content,
+                    content_type=document.mime_type,
+                )
+            except StorageProviderError as exc:
+                raise ApiError(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    code="STORAGE_PROVIDER_ERROR",
+                    message="No fue posible guardar el archivo en el almacenamiento.",
+                    details={"documentId": str(document.id)},
+                ) from exc
             jobs = DocumentJobQueue(self.db).enqueue_post_upload_jobs(
                 document,
                 actor=user,
@@ -332,7 +347,11 @@ class DocumentService:
                 details={"documentId": str(document.id)},
             )
         if upload is not None and upload.status != "completed":
+            if upload.upload_method == "signed_url":
+                self._ensure_uploaded_object_exists(document, upload)
             self.documents.complete_upload(upload, utc_now())
+        elif upload is not None and upload.upload_method == "signed_url":
+            self._ensure_uploaded_object_exists(document, upload)
         document.status = "uploaded"
         document.validation_status = "in_progress"
         document.updated_at = utc_now()
@@ -436,6 +455,87 @@ class DocumentService:
             "url": self.storage.signed_view_url(document_id=str(document.id)),
             "expiresInSeconds": 300,
         }
+
+    def save_signed_upload(
+        self,
+        document_id: str,
+        *,
+        content: bytes,
+        content_type: str | None,
+        expires: int,
+        token: str,
+    ) -> dict[str, Any]:
+        document = self._get_document_or_404(document_id)
+        if not self.storage.validate_token(
+            document_id=str(document.id),
+            expires=expires,
+            token=token,
+            action="upload",
+        ):
+            raise ApiError(
+                status_code=status.HTTP_403_FORBIDDEN,
+                code="DOCUMENT_UPLOAD_EXPIRED",
+                message="La URL temporal expiro o no es valida.",
+            )
+        upload = self.documents.latest_upload_for_document(document.id)
+        if upload is None or upload.upload_method != "signed_url":
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code="DOCUMENT_UPLOAD_NOT_ALLOWED",
+                message="Este documento no tiene una carga firmada activa.",
+            )
+        if upload.expires_at is not None and _as_utc(upload.expires_at) < utc_now():
+            self.documents.mark_upload_failed(
+                upload,
+                error_code="DOCUMENT_UPLOAD_EXPIRED",
+                error_message="La carga expiro. Inicia una nueva carga.",
+            )
+            self.db.commit()
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code="DOCUMENT_UPLOAD_EXPIRED",
+                message="La carga expiro. Inicia una nueva carga.",
+                details={"documentId": str(document.id)},
+            )
+        if upload.status == "completed":
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code="DOCUMENT_UPLOAD_ALREADY_COMPLETED",
+                message="La carga de este documento ya fue completada.",
+            )
+        if len(content) != document.size_bytes:
+            raise ApiError(
+                status_code=422,
+                code="DOCUMENT_VALIDATION_FAILED",
+                message="El tamano del archivo no coincide con la carga solicitada.",
+                details={
+                    "expectedSizeBytes": document.size_bytes,
+                    "receivedSizeBytes": len(content),
+                },
+            )
+        if content_type:
+            received_type = content_type.split(";", 1)[0].strip().lower()
+            if received_type and received_type != document.mime_type.lower():
+                raise ApiError(
+                    status_code=422,
+                    code="DOCUMENT_MIME_TYPE_NOT_ALLOWED",
+                    message="El tipo MIME enviado no coincide con el documento.",
+                )
+        _assert_content_matches_mime(content, document.mime_type)
+        try:
+            self.storage.save(
+                storage_key=document.storage_key,
+                content=content,
+                content_type=document.mime_type,
+            )
+        except StorageProviderError as exc:
+            raise ApiError(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                code="STORAGE_PROVIDER_ERROR",
+                message="No fue posible guardar el archivo en el almacenamiento.",
+                details={"documentId": str(document.id)},
+            ) from exc
+        return {"documentId": str(document.id), "status": "uploaded"}
 
     def update_document(
         self,
@@ -695,21 +795,24 @@ class DocumentService:
         user: User,
         ip_address: str | None,
         user_agent: str | None,
-    ) -> Path:
+    ) -> Document:
         document = self._get_document_or_404(document_id)
         case = self._get_case_or_404(document.case_id)
         self._require_can_view_case(case, user, ip_address, user_agent)
+        if document.status in {"deleted", "failed"} or document.deleted_at is not None:
+            raise self._document_not_found()
         if not self.storage.validate_token(
             document_id=str(document.id),
             expires=expires,
             token=token,
+            action="view",
         ):
             raise ApiError(
                 status_code=status.HTTP_403_FORBIDDEN,
                 code="DOCUMENT_UPLOAD_EXPIRED",
                 message="La URL temporal expiro o no es valida.",
             )
-        return self.storage.path_for_key(document.storage_key)
+        return document
 
     def _validate_create_request(
         self,
@@ -947,11 +1050,47 @@ class DocumentService:
             "expiresAt": upload.expires_at,
         }
         if upload.upload_method == "signed_url":
-            payload["uploadUrl"] = self.storage.signed_view_url(
-                document_id=str(document.id),
-                expires_in_seconds=900,
-            )
+            try:
+                payload["uploadUrl"] = self.storage.signed_upload_url(
+                    document_id=str(document.id),
+                    storage_key=document.storage_key,
+                    expires_in_seconds=settings.minio_presigned_upload_ttl_seconds,
+                )
+            except StorageProviderError as exc:
+                raise ApiError(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    code="STORAGE_PROVIDER_ERROR",
+                    message="No fue posible generar la URL temporal de subida.",
+                    details={"documentId": str(document.id)},
+                ) from exc
+            payload["headers"] = {"Content-Type": document.mime_type}
         return payload
+
+    def _ensure_uploaded_object_exists(self, document: Document, upload: FileUpload) -> None:
+        try:
+            exists = self.storage.exists(document.storage_key)
+        except StorageProviderError as exc:
+            raise ApiError(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                code="STORAGE_PROVIDER_ERROR",
+                message="No fue posible verificar el archivo en el almacenamiento.",
+                details={"documentId": str(document.id)},
+            ) from exc
+        if exists:
+            return
+
+        self.documents.mark_upload_failed(
+            upload,
+            error_code="STORAGE_PROVIDER_ERROR",
+            error_message="El archivo no existe en el almacenamiento.",
+        )
+        self.db.commit()
+        raise ApiError(
+            status_code=status.HTTP_409_CONFLICT,
+            code="STORAGE_PROVIDER_ERROR",
+            message="El archivo no fue encontrado en el almacenamiento. Sube el archivo antes de completar la carga.",
+            details={"documentId": str(document.id)},
+        )
 
     def _document_summary(self, document: Document) -> dict[str, Any]:
         return {
