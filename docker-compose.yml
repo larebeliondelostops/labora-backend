@@ -76,6 +76,7 @@ services:
       <CORSConfiguration>
         <CORSRule>
           <AllowedOrigin>http://localhost:3000</AllowedOrigin>
+          <AllowedOrigin>https://labora.centralspike.com</AllowedOrigin>
           <AllowedMethod>GET</AllowedMethod>
           <AllowedMethod>PUT</AllowedMethod>
           <AllowedMethod>POST</AllowedMethod>

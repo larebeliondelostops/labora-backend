@@ -123,6 +123,35 @@ AUTH_COOKIE_SAMESITE=lax
 AUTH_COOKIE_DOMAIN=
 ```
 
+## MinIO en produccion
+
+El backend firma las subidas con el endpoint publico de MinIO, pero lee y verifica
+objetos usando la red interna de Docker. En produccion usa valores como estos:
+
+```env
+STORAGE_BACKEND=minio
+MINIO_ENDPOINT=http://labora-minio:9000
+MINIO_PUBLIC_ENDPOINT=https://minio.centralspike.com
+MINIO_ACCESS_KEY=replace_with_minio_access_key
+MINIO_SECRET_KEY=replace_with_minio_secret_key
+MINIO_BUCKET=documents
+MINIO_REGION=us-east-1
+MINIO_SECURE=false
+MINIO_PRESIGNED_UPLOAD_TTL_SECONDS=900
+BACKEND_PUBLIC_URL=https://labora.backend.centralspike.com
+CORS_ORIGINS=https://labora.centralspike.com,http://localhost:3000
+```
+
+Expone `https://minio.centralspike.com` hacia `labora-minio:9000` solamente
+para la API S3. No expongas la consola `9001` en ese mismo subdominio.
+La comprobacion publica esperada es:
+
+```sh
+curl -I https://minio.centralspike.com/minio/health/live
+```
+
+Debe responder `200`.
+
 Rutas principales:
 
 - `POST /api/v1/auth/register`

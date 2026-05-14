@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     MINIO_ACCESS_KEY: str = "labora_minio"
     MINIO_SECRET_KEY: str = "labora_minio_password"
     MINIO_BUCKET: str = "documents"
+    MINIO_REGION: str = "us-east-1"
     MINIO_SECURE: bool = False
     MINIO_PRESIGNED_UPLOAD_TTL_SECONDS: int = 900
 
@@ -262,6 +263,10 @@ class Settings(BaseSettings):
     @property
     def minio_bucket(self) -> str:
         return self.MINIO_BUCKET
+
+    @property
+    def minio_region(self) -> str:
+        return self.MINIO_REGION
 
     @property
     def minio_secure(self) -> bool:

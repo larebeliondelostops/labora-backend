@@ -226,6 +226,7 @@ class DocumentStorageService:
             access_key=settings.minio_access_key,
             secret_key=settings.minio_secret_key,
             secure=secure,
+            region=settings.minio_region,
         )
 
 

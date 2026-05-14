@@ -39,7 +39,10 @@ from app.services.consent_service import (
     REQUIRED_CONSENT_TYPES,
     calculate_document_hash,
 )
-from app.services.document_storage_service import DocumentStorageService
+from app.services.document_storage_service import (
+    DocumentStorageService,
+    _normalize_minio_endpoint,
+)
 from app.utils.dates import utc_now
 
 
@@ -419,6 +422,22 @@ def test_complete_upload_reads_private_minio_object(client_and_session, monkeypa
     }
 
 
+def test_minio_endpoint_scheme_controls_public_presigned_scheme() -> None:
+    endpoint, secure = _normalize_minio_endpoint(
+        "https://minio.centralspike.com",
+        default_secure=False,
+    )
+    assert endpoint == "minio.centralspike.com"
+    assert secure is True
+
+    endpoint, secure = _normalize_minio_endpoint(
+        "http://labora-minio:9000",
+        default_secure=True,
+    )
+    assert endpoint == "labora-minio:9000"
+    assert secure is False
+
+
 def _create_user(session_factory, *, role: str = "user"):
     db = session_factory()
     try:
@@ -597,6 +616,7 @@ def _use_fake_minio(
     monkeypatch.setattr(settings, "MINIO_ACCESS_KEY", "labora_minio")
     monkeypatch.setattr(settings, "MINIO_SECRET_KEY", "labora_minio_password")
     monkeypatch.setattr(settings, "MINIO_BUCKET", "documents")
+    monkeypatch.setattr(settings, "MINIO_REGION", "us-east-1")
     monkeypatch.setattr(settings, "MINIO_SECURE", False)
     monkeypatch.setattr(settings, "MINIO_PRESIGNED_UPLOAD_TTL_SECONDS", 900)
 
