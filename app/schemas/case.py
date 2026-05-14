@@ -319,6 +319,7 @@ class CaseListItem(BaseModel):
     status: str
     current_step: str = Field(alias="currentStep")
     next_best_action: str = Field(alias="nextBestAction")
+    allowed_actions: list[str] = Field(alias="allowedActions")
     updated_at: datetime = Field(alias="updatedAt")
 
 

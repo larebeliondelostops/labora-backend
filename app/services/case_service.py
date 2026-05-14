@@ -1224,6 +1224,7 @@ class CaseService:
         return False
 
     def _detail(self, case: LaboraCase, *, admin: bool) -> dict[str, Any]:
+        current_step, next_best_action = serialized_step_for_case(case)
         detail = {
             "id": str(case.id),
             "caseNumber": case.case_number,
@@ -1249,8 +1250,8 @@ class CaseService:
             "situationType": case.situation_type,
             "status": case.status,
             "statusReason": case.status_reason,
-            "currentStep": case.current_step,
-            "nextBestAction": case.next_best_action,
+            "currentStep": current_step,
+            "nextBestAction": next_best_action,
             "allowedActions": allowed_actions_for_status(case.status),
             "createdAt": case.created_at,
             "updatedAt": case.updated_at,
@@ -1268,14 +1269,16 @@ class CaseService:
         return detail
 
     def _list_item(self, case: LaboraCase) -> dict[str, Any]:
+        current_step, next_best_action = serialized_step_for_case(case)
         return {
             "id": str(case.id),
             "caseNumber": case.case_number,
             "holderFullName": _holder_full_name(case),
             "caseTypeRequested": case.case_type_requested,
             "status": case.status,
-            "currentStep": case.current_step,
-            "nextBestAction": case.next_best_action,
+            "currentStep": current_step,
+            "nextBestAction": next_best_action,
+            "allowedActions": allowed_actions_for_status(case.status),
             "updatedAt": case.updated_at,
         }
 
@@ -1378,7 +1381,7 @@ def step_for_status(status_value: str) -> tuple[str, str]:
         "ready_for_documents": ("documents_pending", "upload_documents"),
         "documents_pending": ("documents_pending", "upload_documents"),
         "documents_uploaded": ("documents_uploaded", "start_preanalysis"),
-        "preanalysis_pending": ("preanalysis_pending", "wait_preanalysis"),
+        "preanalysis_pending": ("preanalysis_pending", "start_preanalysis"),
         "preanalysis_ready": ("preanalysis_ready", "view_preanalysis"),
         "preview_locked": ("preview_locked", "unlock_full_analysis"),
         "paid_unlocked": ("analysis_unlocked", "start_full_analysis"),
@@ -1393,6 +1396,13 @@ def step_for_status(status_value: str) -> tuple[str, str]:
     return mapping[status_value]
 
 
+def serialized_step_for_case(case: LaboraCase) -> tuple[str, str]:
+    current_step, next_best_action = step_for_status(case.status)
+    if case.status == "documents_uploaded" and case.current_step == "preanalysis_pending":
+        current_step = "preanalysis_pending"
+    return current_step, next_best_action
+
+
 def allowed_actions_for_status(status_value: str) -> list[str]:
     actions = ["view_history"]
     if status_value in {"draft", "created"}:
@@ -1400,7 +1410,7 @@ def allowed_actions_for_status(status_value: str) -> list[str]:
     elif status_value in {"ready_for_documents", "documents_pending"}:
         actions.extend(["edit_case", "upload_documents", "close_case"])
     elif status_value in {"documents_uploaded", "preanalysis_pending"}:
-        actions.extend(["view_documents", "close_case"])
+        actions.extend(["view_documents", "start_preanalysis", "close_case"])
     elif status_value == "preanalysis_ready":
         actions.extend(["view_documents", "view_preanalysis", "close_case"])
     elif status_value == "preview_locked":

@@ -161,6 +161,14 @@ def test_document_types_and_multipart_upload_flow(client_and_session) -> None:
     assert readiness.status_code == 200
     assert readiness.json()["readinessStatus"] == "ready_for_preanalysis"
     assert readiness.json()["hasPrimaryLaborHistory"] is True
+    assert readiness.json()["nextAction"] == "continue_to_preanalysis"
+
+    case_detail = client.get(f"/api/v1/cases/{case_id}", headers=headers)
+    assert case_detail.status_code == 200
+    assert case_detail.json()["status"] == "documents_uploaded"
+    assert case_detail.json()["currentStep"] == "documents_uploaded"
+    assert case_detail.json()["nextBestAction"] == "start_preanalysis"
+    assert "start_preanalysis" in case_detail.json()["allowedActions"]
 
     db = session_factory()
     try:

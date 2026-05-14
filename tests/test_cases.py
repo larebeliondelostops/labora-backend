@@ -281,6 +281,69 @@ def test_internal_status_and_ai_suggestion(client_and_session) -> None:
     assert "docente" in suggestion.json()["tags"]
 
 
+def test_case_detail_serializes_documents_uploaded_preanalysis_action(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    case_id = _create_case_row(
+        session_factory,
+        user_id,
+        status="documents_uploaded",
+        current_step="documents_uploaded",
+        next_best_action="none",
+    )
+
+    detail = client.get(f"/api/v1/cases/{case_id}", headers=headers)
+    listed = client.get("/api/v1/cases", headers=headers)
+
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "documents_uploaded"
+    assert detail.json()["currentStep"] == "documents_uploaded"
+    assert detail.json()["nextBestAction"] == "start_preanalysis"
+    assert "start_preanalysis" in detail.json()["allowedActions"]
+    assert listed.status_code == 200
+    assert listed.json()["data"][0]["nextBestAction"] == "start_preanalysis"
+    assert "start_preanalysis" in listed.json()["data"][0]["allowedActions"]
+
+
+def test_case_detail_serializes_preanalysis_pending_action(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    case_id = _create_case_row(
+        session_factory,
+        user_id,
+        status="preanalysis_pending",
+        current_step="preanalysis_pending",
+        next_best_action="wait_preanalysis",
+    )
+
+    detail = client.get(f"/api/v1/cases/{case_id}", headers=headers)
+
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "preanalysis_pending"
+    assert detail.json()["currentStep"] == "preanalysis_pending"
+    assert detail.json()["nextBestAction"] == "start_preanalysis"
+    assert "start_preanalysis" in detail.json()["allowedActions"]
+
+
+def test_case_detail_serializes_preanalysis_ready_action(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    case_id = _create_case_row(
+        session_factory,
+        user_id,
+        status="preanalysis_ready",
+        current_step="preanalysis_ready",
+        next_best_action="none",
+    )
+
+    detail = client.get(f"/api/v1/cases/{case_id}", headers=headers)
+
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "preanalysis_ready"
+    assert detail.json()["nextBestAction"] == "view_preanalysis"
+    assert "view_preanalysis" in detail.json()["allowedActions"]
+
+
 def _create_user(session_factory, *, role: str = "user"):
     db = session_factory()
     try:
@@ -299,6 +362,55 @@ def _create_user(session_factory, *, role: str = "user"):
         db.commit()
         token = create_access_token(str(user.id), {"role": role, "sid": str(uuid4())})
         return user.id, {"Authorization": f"Bearer {token}"}
+    finally:
+        db.close()
+
+
+def _create_case_row(
+    session_factory,
+    user_id: UUID,
+    *,
+    status: str,
+    current_step: str,
+    next_best_action: str,
+) -> str:
+    db = session_factory()
+    now = utc_now()
+    try:
+        case = LaboraCase(
+            case_number=f"CASO-2026-{uuid4().hex[:6]}",
+            owner_user_id=user_id,
+            holder_type="self",
+            holder_first_name="Maria",
+            holder_last_name="Gomez Perez",
+            holder_document_type="CC",
+            holder_document_number="52123456",
+            holder_email="maria@example.com",
+            holder_phone="+573001112233",
+            acting_as_third_party=False,
+            third_party_authorization_status="not_required",
+            case_type_requested="labor_history_analysis",
+            pension_fund_or_entity="Colpensiones",
+            situation_type="pensioned_with_doubts",
+            status=status,
+            current_step=current_step,
+            next_best_action=next_best_action,
+            is_sensitive=True,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(case)
+        db.flush()
+        db.add(
+            CaseOwner(
+                case_id=case.id,
+                user_id=user_id,
+                role="owner",
+                permissions={"edit_case": True, "view_history": True, "close_case": True},
+            )
+        )
+        db.commit()
+        return str(case.id)
     finally:
         db.close()
 
