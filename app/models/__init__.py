@@ -12,6 +12,14 @@ from app.models.consent import (
     LegalDocument,
     UserConsent,
 )
+from app.models.document import (
+    Document,
+    DocumentHash,
+    DocumentPage,
+    DocumentType,
+    DocumentValidation,
+    FileUpload,
+)
 from app.models.external_auth_account import ExternalAuthAccount
 from app.models.faq_item import FaqItem
 from app.models.lead import Lead
@@ -32,8 +40,14 @@ __all__ = [
     "CaseTag",
     "ConsentEvidence",
     "ConsentIdempotencyKey",
+    "Document",
+    "DocumentHash",
+    "DocumentPage",
+    "DocumentType",
+    "DocumentValidation",
     "ExternalAuthAccount",
     "FaqItem",
+    "FileUpload",
     "Lead",
     "LegalDocument",
     "LaboraCase",

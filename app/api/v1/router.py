@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, cases, consents, health, public, users
+from app.api.v1.endpoints import auth, cases, consents, documents, health, public, users
 
 api_router = APIRouter()
 
@@ -33,6 +33,10 @@ api_router.include_router(
     cases.admin_router,
     prefix="/admin/cases",
     tags=["admin-cases"],
+)
+api_router.include_router(
+    documents.router,
+    tags=["documents"],
 )
 api_router.include_router(
     consents.legal_documents_router,

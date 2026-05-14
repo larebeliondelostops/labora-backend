@@ -49,11 +49,15 @@ def api_error_handler(request, exc: ApiError) -> JSONResponse:
 def request_validation_error_handler(request, exc: RequestValidationError) -> JSONResponse:
     request_id = f"req_{secrets.token_urlsafe(8)}"
     is_case_path = _is_case_path(request.url.path)
+    is_document_path = _is_document_path(request.url.path)
     return JSONResponse(
-        status_code=400 if is_case_path else 422,
+        status_code=400 if is_case_path and not is_document_path else 422,
         content={
             "error": {
-                "code": "CASE_VALIDATION_ERROR" if is_case_path else "VALIDATION_ERROR",
+                "code": _validation_error_code(
+                    is_case_path=is_case_path,
+                    is_document_path=is_document_path,
+                ),
                 "message": "La solicitud contiene datos invalidos.",
                 "details": [
                     {
@@ -77,6 +81,26 @@ def _is_case_path(path: str) -> bool:
             f"{settings.API_V1_PREFIX}/internal/cases",
         )
     )
+
+
+def _is_document_path(path: str) -> bool:
+    return path.startswith(
+        (
+            f"{settings.API_V1_PREFIX}/documents",
+            f"{settings.API_V1_PREFIX}/document-types",
+        )
+    ) or (
+        path.startswith(f"{settings.API_V1_PREFIX}/cases")
+        and "document" in path
+    )
+
+
+def _validation_error_code(*, is_case_path: bool, is_document_path: bool) -> str:
+    if is_document_path:
+        return "DOCUMENT_VALIDATION_FAILED"
+    if is_case_path:
+        return "CASE_VALIDATION_ERROR"
+    return "VALIDATION_ERROR"
 
 
 def _validation_field(loc: list | tuple) -> str:

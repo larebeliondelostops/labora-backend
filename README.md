@@ -75,6 +75,17 @@ docker compose exec labora-backend pytest
 - `GET /`
 - `GET /api/v1/health`
 - `GET /api/v1/health/db`
+- `GET /api/v1/document-types`
+- `POST /api/v1/cases/{caseId}/documents`
+- `GET /api/v1/cases/{caseId}/documents`
+- `GET /api/v1/cases/{caseId}/document-readiness`
+- `GET /api/v1/documents/{documentId}`
+- `GET /api/v1/documents/{documentId}/view-url`
+- `PATCH /api/v1/documents/{documentId}`
+- `POST /api/v1/documents/{documentId}/replace`
+- `DELETE /api/v1/documents/{documentId}`
+
+Documentacion del modulo documental: `docs/carga_documental_backend.md`.
 
 ## Modulo cuenta y autenticacion
 
