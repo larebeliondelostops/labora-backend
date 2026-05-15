@@ -215,12 +215,19 @@ MINIO_BUCKET=documents
 MINIO_REGION=us-east-1
 MINIO_SECURE=false
 MINIO_PRESIGNED_UPLOAD_TTL_SECONDS=900
+API_PUBLIC_BASE_URL=https://labora.backend.centralspike.com
 BACKEND_PUBLIC_URL=https://labora.backend.centralspike.com
 CORS_ORIGINS=https://labora.centralspike.com,http://localhost:3000
 ```
 
 Expone `https://minio.centralspike.com` hacia `labora-minio:9000` solamente
 para la API S3. No expongas la consola `9001` en ese mismo subdominio.
+Con `STORAGE_BACKEND=minio`, las URLs temporales de visualizacion/descarga se
+firman directo contra `MINIO_PUBLIC_ENDPOINT` usando `presigned_get_object`.
+El bucket sigue privado: el navegador solo recibe una URL temporal. En
+produccion `MINIO_PUBLIC_ENDPOINT`, `API_PUBLIC_BASE_URL` y
+`BACKEND_PUBLIC_URL` deben apuntar a dominios publicos reales, nunca a
+`localhost`, `127.0.0.1` ni nombres internos de Docker.
 La comprobacion publica esperada es:
 
 ```sh

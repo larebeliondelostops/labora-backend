@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import ipaddress
 import time
 from collections.abc import Iterator
 from datetime import timedelta
@@ -169,7 +170,25 @@ class DocumentStorageService:
             f"?expires={expires}&token={signature}"
         )
 
-    def signed_view_url(self, *, document_id: str, expires_in_seconds: int = 300) -> str:
+    def signed_view_url(
+        self,
+        *,
+        document_id: str,
+        storage_key: str | None = None,
+        expires_in_seconds: int = 300,
+    ) -> str:
+        if self.is_minio:
+            if not storage_key:
+                raise StorageProviderError("Storage key requerido para visualizar desde MinIO.")
+            try:
+                return self._public_client().presigned_get_object(
+                    self.bucket_name,
+                    storage_key,
+                    expires=timedelta(seconds=expires_in_seconds),
+                )
+            except Exception as exc:
+                raise StorageProviderError("No fue posible generar la URL de visualizacion.") from exc
+
         expires = int(time.time()) + expires_in_seconds
         signature = self._signature(
             document_id=document_id,
@@ -210,6 +229,7 @@ class DocumentStorageService:
 
     def _public_client(self):
         if self._minio_public_client is None:
+            _validate_public_minio_endpoint()
             self._minio_public_client = self._build_minio_client(
                 settings.minio_public_endpoint,
             )
@@ -268,7 +288,61 @@ def _close_minio_response(response) -> None:
 
 
 def _backend_url() -> str:
-    return settings.backend_public_url
+    public_url = settings.backend_public_url
+    if _is_production_env() and _is_local_or_internal_url(public_url):
+        raise StorageProviderError(
+            "BACKEND_PUBLIC_URL/API_PUBLIC_BASE_URL debe ser una URL publica en produccion."
+        )
+    return public_url
+
+
+def _validate_public_minio_endpoint() -> None:
+    if not _is_production_env():
+        return
+    public_endpoint = settings.minio_public_endpoint
+    if _is_local_or_internal_url(_endpoint_as_url(public_endpoint, secure=settings.minio_secure)):
+        raise StorageProviderError(
+            "MINIO_PUBLIC_ENDPOINT debe ser una URL publica en produccion."
+        )
+
+
+def _endpoint_as_url(raw_endpoint: str, *, secure: bool) -> str:
+    endpoint = raw_endpoint.strip()
+    if "://" in endpoint:
+        return endpoint
+    scheme = "https" if secure else "http"
+    return f"{scheme}://{endpoint}"
+
+
+def _is_production_env() -> bool:
+    return settings.app_env.strip().lower() in {"production", "prod"}
+
+
+def _is_local_or_internal_url(raw_url: str) -> bool:
+    parsed = urlsplit(raw_url)
+    hostname = (parsed.hostname or "").strip().lower()
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        return True
+    if hostname in {
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+        "host.docker.internal",
+        "minio",
+        "labora-minio",
+        "labora-backend",
+    }:
+        return True
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None:
+        return address.is_loopback or address.is_private or address.is_link_local
+    if hostname.endswith(".local") or hostname.endswith(".internal"):
+        return True
+    return False
 
 
 def _storage_root(raw_path: str) -> Path:

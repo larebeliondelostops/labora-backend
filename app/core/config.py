@@ -39,6 +39,8 @@ class Settings(BaseSettings):
 
     FRONTEND_URL: str = "http://localhost:3000"
     BACKEND_PUBLIC_URL: str = "http://localhost:8000"
+    API_PUBLIC_BASE_URL: str = ""
+    PUBLIC_API_URL: str = ""
 
     AUTH_COOKIE_NAME: str = "labora_access_token"
     AUTH_COOKIE_SECURE: bool = False
@@ -167,7 +169,11 @@ class Settings(BaseSettings):
 
     @property
     def backend_public_url(self) -> str:
-        return self.BACKEND_PUBLIC_URL.rstrip("/")
+        return (
+            self.API_PUBLIC_BASE_URL
+            or self.PUBLIC_API_URL
+            or self.BACKEND_PUBLIC_URL
+        ).rstrip("/")
 
     @property
     def email_provider(self) -> str:

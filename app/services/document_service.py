@@ -451,8 +451,19 @@ class DocumentService:
             user_agent=user_agent,
         )
         self.db.commit()
+        try:
+            view_url = self.storage.signed_view_url(
+                document_id=str(document.id),
+                storage_key=document.storage_key,
+            )
+        except StorageProviderError as exc:
+            raise ApiError(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                code="PUBLIC_URL_CONFIGURATION_ERROR",
+                message="No fue posible generar una URL publica para visualizar el documento.",
+            ) from exc
         return {
-            "url": self.storage.signed_view_url(document_id=str(document.id)),
+            "url": view_url,
             "expiresInSeconds": 300,
         }
 

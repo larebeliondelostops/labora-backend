@@ -77,9 +77,12 @@ TITLES = {
 
 @pytest.fixture()
 def client_and_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "APP_ENV", "development")
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "local")
     monkeypatch.setattr(settings, "LOCAL_STORAGE_PATH", str(tmp_path / "storage"))
     monkeypatch.setattr(settings, "BACKEND_PUBLIC_URL", "http://localhost:8000")
+    monkeypatch.setattr(settings, "API_PUBLIC_BASE_URL", "")
+    monkeypatch.setattr(settings, "PUBLIC_API_URL", "")
     monkeypatch.setattr(settings, "MINIO_BUCKET", "documents")
     monkeypatch.setattr(settings, "MINIO_PRESIGNED_UPLOAD_TTL_SECONDS", 900)
 
@@ -215,6 +218,60 @@ def test_upload_blocks_missing_consent_and_foreign_case_access(client_and_sessio
     )
     assert blocked.status_code == 422
     assert blocked.json()["error"]["code"] == "CONSENT_REQUIRED"
+
+
+def test_document_view_url_uses_public_api_base_url_in_production(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    monkeypatch.setattr(settings, "APP_ENV", "production")
+    monkeypatch.setattr(settings, "BACKEND_PUBLIC_URL", "http://localhost:8000")
+    monkeypatch.setattr(settings, "API_PUBLIC_BASE_URL", "https://labora-api.centralspike.com")
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case(client, headers)
+    created = _upload_pdf(
+        client,
+        headers,
+        case_id,
+        filename="historia-laboral.pdf",
+        document_type_code="historia_laboral",
+        is_primary=True,
+        content=_labor_history_pdf(),
+    )
+    document_id = created.json()["document"]["id"]
+
+    response = client.get(f"/api/v1/documents/{document_id}/view-url", headers=headers)
+
+    assert response.status_code == 200
+    url = response.json()["url"]
+    assert url.startswith(f"https://labora-api.centralspike.com/api/v1/documents/{document_id}/file")
+    assert "localhost" not in url
+    assert "127.0.0.1" not in url
+
+
+def test_document_view_url_rejects_localhost_in_production(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    monkeypatch.setattr(settings, "APP_ENV", "production")
+    monkeypatch.setattr(settings, "BACKEND_PUBLIC_URL", "http://localhost:8000")
+    monkeypatch.setattr(settings, "API_PUBLIC_BASE_URL", "")
+    monkeypatch.setattr(settings, "PUBLIC_API_URL", "")
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case(client, headers)
+    created = _upload_pdf(
+        client,
+        headers,
+        case_id,
+        filename="historia-laboral.pdf",
+        document_type_code="historia_laboral",
+        is_primary=True,
+        content=_labor_history_pdf(),
+    )
+    document_id = created.json()["document"]["id"]
+
+    response = client.get(f"/api/v1/documents/{document_id}/view-url", headers=headers)
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "PUBLIC_URL_CONFIGURATION_ERROR"
 
 
 def test_document_validations_duplicates_update_replace_and_delete(client_and_session) -> None:
@@ -430,6 +487,70 @@ def test_complete_upload_reads_private_minio_object(client_and_session, monkeypa
     }
 
 
+def test_view_url_uses_minio_public_presigned_get_url(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    _use_fake_minio(
+        monkeypatch,
+        object_exists=True,
+        content=_labor_history_pdf(),
+        public_endpoint="https://minio.centralspike.com",
+    )
+    monkeypatch.setattr(settings, "APP_ENV", "production")
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case(client, headers)
+    created = client.post(
+        f"/api/v1/cases/{case_id}/documents",
+        headers=headers,
+        json={
+            "originalFilename": "historia-laboral.pdf",
+            "mimeType": "application/pdf",
+            "sizeBytes": len(_labor_history_pdf()),
+            "documentTypeCode": "historia_laboral",
+            "isPrimary": True,
+        },
+    )
+    assert created.status_code == 201
+    document_id = created.json()["document"]["id"]
+
+    response = client.get(f"/api/v1/documents/{document_id}/view-url", headers=headers)
+
+    assert response.status_code == 200
+    url = response.json()["url"]
+    assert url.startswith("https://minio.centralspike.com/documents/")
+    assert "X-Amz-Signature=fake-get" in url
+    assert f"/api/v1/documents/{document_id}/file" not in url
+    assert "localhost" not in url
+    assert "labora-minio" not in url
+
+
+def test_minio_signed_urls_reject_internal_public_endpoint_in_production(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    _use_fake_minio(
+        monkeypatch,
+        object_exists=True,
+        content=_labor_history_pdf(),
+        public_endpoint="labora-minio:9000",
+    )
+    monkeypatch.setattr(settings, "APP_ENV", "production")
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case(client, headers)
+    created = client.post(
+        f"/api/v1/cases/{case_id}/documents",
+        headers=headers,
+        json={
+            "originalFilename": "historia-laboral.pdf",
+            "mimeType": "application/pdf",
+            "sizeBytes": len(_labor_history_pdf()),
+            "documentTypeCode": "historia_laboral",
+            "isPrimary": True,
+        },
+    )
+    assert created.status_code == 502
+    assert created.json()["error"]["code"] == "STORAGE_PROVIDER_ERROR"
+
+
 def test_minio_endpoint_scheme_controls_public_presigned_scheme() -> None:
     endpoint, secure = _normalize_minio_endpoint(
         "https://minio.centralspike.com",
@@ -617,10 +738,11 @@ def _use_fake_minio(
     *,
     object_exists: bool,
     content: bytes = b"",
+    public_endpoint: str = "localhost:9000",
 ) -> None:
     monkeypatch.setattr(settings, "STORAGE_BACKEND", "minio")
     monkeypatch.setattr(settings, "MINIO_ENDPOINT", "labora-minio:9000")
-    monkeypatch.setattr(settings, "MINIO_PUBLIC_ENDPOINT", "localhost:9000")
+    monkeypatch.setattr(settings, "MINIO_PUBLIC_ENDPOINT", public_endpoint)
     monkeypatch.setattr(settings, "MINIO_ACCESS_KEY", "labora_minio")
     monkeypatch.setattr(settings, "MINIO_SECRET_KEY", "labora_minio_password")
     monkeypatch.setattr(settings, "MINIO_BUCKET", "documents")
@@ -652,10 +774,21 @@ def _use_fake_minio(
         def __init__(self, endpoint: str) -> None:
             self.endpoint = endpoint
 
+        @property
+        def base_url(self) -> str:
+            if self.endpoint.startswith(("http://", "https://")):
+                return self.endpoint
+            return f"http://{self.endpoint}"
+
         def presigned_put_object(self, bucket_name, object_name, expires):
             assert bucket_name == "documents"
             assert expires.total_seconds() == 900
-            return f"http://{self.endpoint}/{bucket_name}/{object_name}?X-Amz-Signature=fake"
+            return f"{self.base_url}/{bucket_name}/{object_name}?X-Amz-Signature=fake"
+
+        def presigned_get_object(self, bucket_name, object_name, expires):
+            assert bucket_name == "documents"
+            assert expires.total_seconds() == 300
+            return f"{self.base_url}/{bucket_name}/{object_name}?X-Amz-Signature=fake-get"
 
         def stat_object(self, bucket_name, object_name):
             assert bucket_name == "documents"
