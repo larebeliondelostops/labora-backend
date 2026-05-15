@@ -35,16 +35,32 @@ from app.models.otp_code import OTPCode
 from app.models.password_reset_token import PasswordResetToken
 from app.models.public_content import PublicContent
 from app.models.public_event import PublicEvent
+from app.models.questionnaire import (
+    AiQuestionnaireEvent,
+    AnswerVersion,
+    CaseProfile,
+    CaseQuestionnaireSession,
+    ConditionalRule,
+    Question,
+    QuestionnaireAnswer,
+    QuestionnaireTemplate,
+    QuestionOption,
+)
 from app.models.session import Session
 from app.models.user import User
 from app.models.visitor_intent import VisitorIntent
 
 __all__ = [
     "AuditEvent",
+    "AiQuestionnaireEvent",
+    "AnswerVersion",
     "CaseHistoryEvent",
     "CaseOwner",
+    "CaseProfile",
+    "CaseQuestionnaireSession",
     "CaseStatusHistory",
     "CaseTag",
+    "ConditionalRule",
     "ConsentEvidence",
     "ConsentIdempotencyKey",
     "AiConfidence",
@@ -68,6 +84,10 @@ __all__ = [
     "PasswordResetToken",
     "PublicContent",
     "PublicEvent",
+    "Question",
+    "QuestionnaireAnswer",
+    "QuestionnaireTemplate",
+    "QuestionOption",
     "Session",
     "User",
     "UserConsent",

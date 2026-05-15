@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     documents,
     health,
     public,
+    questionnaires,
     users,
 )
 
@@ -55,6 +56,20 @@ api_router.include_router(
     document_precheck.admin_router,
     prefix="/admin",
     tags=["admin-document-precheck"],
+)
+api_router.include_router(
+    questionnaires.router,
+    tags=["questionnaires"],
+)
+api_router.include_router(
+    questionnaires.admin_router,
+    prefix="/admin",
+    tags=["admin-questionnaires"],
+)
+api_router.include_router(
+    questionnaires.internal_router,
+    prefix="/internal",
+    tags=["internal-questionnaires"],
 )
 api_router.include_router(
     consents.legal_documents_router,
