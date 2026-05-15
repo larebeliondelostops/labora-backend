@@ -1,4 +1,5 @@
 from datetime import timedelta
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import app.models  # noqa: F401
@@ -53,6 +54,7 @@ from app.services.consent_service import (
     calculate_document_hash,
 )
 from app.services.document_storage_service import DocumentStorageService, StorageProviderError
+from app.services.document_precheck_service import _classification_input
 from app.utils.dates import utc_now
 
 
@@ -466,7 +468,8 @@ def test_invalid_ai_response_marks_precheck_as_error(client_and_session, monkeyp
     assert data["status"] == "error"
     assert data["decision"] == "failed"
     assert data["trafficLight"] == "red"
-    assert data["issues"][0]["code"] == "provider_invalid_json"
+    assert data["issues"][0]["code"] == "ai_provider_error"
+    assert data["issues"][0]["metadata"]["provider_error_code"] == "AI_PROVIDER_INVALID_RESPONSE"
 
 
 def test_ai_provider_error_marks_precheck_as_error(client_and_session, monkeypatch) -> None:
@@ -510,7 +513,12 @@ def test_ai_provider_error_marks_precheck_as_error(client_and_session, monkeypat
     assert data["trafficLight"] == "red"
     assert data["ocr"]["textDetected"] is True
     assert data["issues"][0]["code"] == "ai_provider_error"
+    assert data["issues"][0]["message"] == "No fue posible completar la clasificacion IA por un error tecnico."
     assert data["issues"][0]["suggestedAction"] == "wait_and_retry"
+    assert data["issues"][0]["metadata"]["provider_error_code"] == "AI_PROVIDER_ERROR"
+    assert data["issues"][0]["metadata"]["provider_status_code"] == 502
+    assert data["issues"][0]["metadata"]["retryable"] is True
+    assert data["summary"] == "No pudimos completar la clasificacion automatica por un error tecnico."
 
 
 def test_force_true_retries_failed_precheck(client_and_session, monkeypatch) -> None:
@@ -569,6 +577,50 @@ def test_force_true_retries_failed_precheck(client_and_session, monkeypatch) -> 
     )
     assert latest.status_code == 200
     assert latest.json()["items"][0]["precheckId"] == retried.json()["precheckId"]
+
+
+def test_classification_payload_trims_large_ocr_text() -> None:
+    document = SimpleNamespace(
+        id=uuid4(),
+        case_id=uuid4(),
+        original_filename="historia-laboral.pdf",
+        mime_type="application/pdf",
+        size_bytes=64_000,
+    )
+    long_text = "historia laboral semanas cotizadas colpensiones " * 500
+    pages = [
+        SimpleNamespace(
+            page_number=index + 1,
+            text_preview=long_text,
+            confidence_score=0.91,
+            text_density=0.8,
+            is_blurry=False,
+            is_rotated=False,
+            has_table_like_content=True,
+            detected_labels=["historia_laboral"],
+        )
+        for index in range(10)
+    ]
+    ocr_job = SimpleNamespace(
+        pages=pages,
+        pages_total=10,
+        text_detected=True,
+        avg_text_density=0.8,
+    )
+
+    payload = _classification_input(
+        document=document,
+        ocr_job=ocr_job,
+        precheck_id=uuid4(),
+        request_id="req-test",
+    )
+    pages = payload["ocrSignals"]["pages"]
+
+    assert payload["fileMetadata"]["originalFilename"] == "historia-laboral.pdf"
+    assert sum(len(page["textPreview"]) for page in pages) <= 12000
+    assert all(len(page["textPreview"]) <= 2000 for page in pages)
+    assert any(page["textPreviewTruncated"] for page in pages)
+    assert "historia laboral" in " ".join(page["textPreview"].lower() for page in pages)
 
 
 def test_ambiguous_document_requires_human_review_with_yellow_light(client_and_session) -> None:
@@ -689,6 +741,7 @@ def test_openai_compatible_provider_exposes_rejected_request_details(monkeypatch
     class FakeResponse:
         status_code = 404
         text = '{"error":{"message":"model not found"}}'
+        headers = {"x-request-id": "req-123", "cf-ray": "trace-456"}
 
         def json(self):
             return {"error": {"message": "model not found"}}
@@ -718,6 +771,9 @@ def test_openai_compatible_provider_exposes_rejected_request_details(monkeypatch
     assert exc_info.value.code == "AI_PROVIDER_MODEL_NOT_FOUND"
     assert exc_info.value.details["statusCode"] == 404
     assert exc_info.value.details["providerMessage"] == "model not found"
+    assert exc_info.value.details["providerErrorCategory"] == "model_not_found"
+    assert exc_info.value.details["providerRequestId"] == "req-123"
+    assert exc_info.value.details["providerTraceId"] == "trace-456"
 
 
 def test_openai_compatible_provider_retries_without_response_format(monkeypatch) -> None:

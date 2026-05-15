@@ -331,11 +331,16 @@ class OpenAiCompatibleProvider:
                 raise AiProviderError(
                     "AI_PROVIDER_ERROR",
                     "No fue posible comunicarse con el proveedor IA.",
-                    details={**context, "attempt": attempt + 1},
+                    details={
+                        **context,
+                        "attempt": attempt + 1,
+                        "providerErrorCategory": "network_error",
+                    },
                 ) from exc
             latency_ms = int((time.perf_counter() - started) * 1000)
             if response.status_code == 429:
                 details = {**_provider_response_details(response), **context, "attempt": attempt + 1}
+                details["providerErrorCategory"] = _provider_error_category("AI_PROVIDER_RATE_LIMITED")
                 _log_provider_error(details=details, latency_ms=latency_ms)
                 raise AiRateLimitedError(
                     "AI_PROVIDER_RATE_LIMITED",
@@ -344,6 +349,7 @@ class OpenAiCompatibleProvider:
                 )
             if response.status_code >= 500:
                 details = {**_provider_response_details(response), **context, "attempt": attempt + 1}
+                details["providerErrorCategory"] = _provider_error_category("AI_PROVIDER_UNAVAILABLE")
                 _log_provider_error(details=details, latency_ms=latency_ms)
                 raise AiProviderError(
                     "AI_PROVIDER_UNAVAILABLE",
@@ -352,8 +358,9 @@ class OpenAiCompatibleProvider:
                 )
             if response.status_code >= 400:
                 details = {**_provider_response_details(response), **context, "attempt": attempt + 1}
-                _log_provider_error(details=details, latency_ms=latency_ms)
                 code = _provider_error_code(response.status_code, details)
+                details["providerErrorCategory"] = _provider_error_category(code)
+                _log_provider_error(details=details, latency_ms=latency_ms)
                 raise AiProviderError(
                     code,
                     _provider_error_message(code, details),
@@ -380,7 +387,11 @@ class OpenAiCompatibleProvider:
                 last_invalid = AiInvalidResponseError(
                     "AI_PROVIDER_INVALID_RESPONSE",
                     "El proveedor IA devolvio JSON invalido.",
-                    details={**context, "attempt": attempt + 1},
+                    details={
+                        **context,
+                        "attempt": attempt + 1,
+                        "providerErrorCategory": "invalid_json",
+                    },
                 )
                 if attempt >= attempts - 1:
                     raise last_invalid from exc
@@ -530,6 +541,20 @@ def _provider_error_code(status_code: int, details: dict[str, Any]) -> str:
     return "AI_PROVIDER_ERROR"
 
 
+def _provider_error_category(code: str) -> str:
+    return {
+        "AI_PROVIDER_AUTH_ERROR": "api_key_invalid",
+        "AI_PROVIDER_BILLING_ERROR": "quota_or_billing",
+        "AI_PROVIDER_MODEL_NOT_FOUND": "model_not_found",
+        "AI_PROVIDER_TOKEN_LIMIT": "token_limit",
+        "AI_PROVIDER_JSON_SCHEMA_ERROR": "json_schema_or_response_format",
+        "AI_PROVIDER_BAD_REQUEST": "payload_invalid",
+        "AI_PROVIDER_RATE_LIMITED": "rate_limit",
+        "AI_PROVIDER_TIMEOUT": "timeout",
+        "AI_PROVIDER_UNAVAILABLE": "provider_unavailable",
+    }.get(code, "provider_error")
+
+
 def _provider_error_message(code: str, details: dict[str, Any]) -> str:
     provider_message = details.get("providerMessage")
     if code == "AI_PROVIDER_AUTH_ERROR":
@@ -553,10 +578,46 @@ def _provider_response_details(response) -> dict[str, Any]:
         "statusCode": response.status_code,
         "responseBody": body,
     }
+    trace_ids = _provider_trace_headers(response)
+    details.update(trace_ids)
     provider_message = _provider_message_from_body(response, body)
     if provider_message:
         details["providerMessage"] = provider_message
     return details
+
+
+def _provider_trace_headers(response) -> dict[str, str]:
+    headers = getattr(response, "headers", {}) or {}
+    request_id = _header_value(
+        headers,
+        "x-request-id",
+        "x-ds-request-id",
+        "x-openai-request-id",
+        "request-id",
+    )
+    trace_id = _header_value(
+        headers,
+        "x-trace-id",
+        "x-ds-trace-id",
+        "cf-ray",
+        "traceparent",
+    )
+    values: dict[str, str] = {}
+    if request_id:
+        values["providerRequestId"] = request_id
+    if trace_id:
+        values["providerTraceId"] = trace_id
+    return values
+
+
+def _header_value(headers, *names: str) -> str | None:
+    for name in names:
+        value = None
+        if hasattr(headers, "get"):
+            value = headers.get(name) or headers.get(name.lower()) or headers.get(name.upper())
+        if value:
+            return str(value)
+    return None
 
 
 def _provider_message_from_body(response, fallback_body: str) -> str | None:
@@ -596,6 +657,7 @@ def _request_log_context(input_payload: dict[str, Any]) -> dict[str, Any]:
 def _classification_payload_summary(input_payload: dict[str, Any]) -> dict[str, Any]:
     pages = input_payload.get("ocrSignals", {}).get("pages", [])
     return {
+        "originalFilename": input_payload.get("fileMetadata", {}).get("originalFilename"),
         "textDetected": input_payload.get("ocrSignals", {}).get("textDetected"),
         "avgTextDensity": input_payload.get("ocrSignals", {}).get("avgTextDensity"),
         "pagesTotal": input_payload.get("fileMetadata", {}).get("pagesTotal"),
@@ -636,6 +698,9 @@ def _log_provider_error(*, details: dict[str, Any], latency_ms: int) -> None:
             "provider_status_code": details.get("statusCode"),
             "provider_message": details.get("providerMessage"),
             "provider_response_body": details.get("responseBody"),
+            "provider_error_category": details.get("providerErrorCategory"),
+            "provider_request_id": details.get("providerRequestId"),
+            "provider_trace_id": details.get("providerTraceId"),
             "latency_ms": latency_ms,
             "attempt": details.get("attempt"),
         },

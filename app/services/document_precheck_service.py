@@ -37,8 +37,9 @@ ADMIN_ROLES = {"admin", "legal_admin"}
 LEGAL_REVIEWER_ROLES = {"legal_reviewer"}
 ACTIVE_PRECHECK_STATUSES = {"queued", "in_progress"}
 COMPLETE_DOCUMENT_STATUSES = {"uploaded", "processing", "validated", "requires_review", "rejected"}
-AI_PAGE_TEXT_PREVIEW_CHARS = 900
-AI_TOTAL_TEXT_PREVIEW_CHARS = 4500
+AI_PAGE_TEXT_PREVIEW_CHARS = 2000
+AI_TOTAL_TEXT_PREVIEW_CHARS = 12000
+AI_PROVIDER_FAILURE_SUMMARY = "No pudimos completar la clasificacion automatica por un error tecnico."
 
 
 class DocumentPrecheckService:
@@ -485,7 +486,7 @@ class DocumentPrecheckService:
                 precheck,
                 document=document,
                 code="AI_PROVIDER_INVALID_RESPONSE",
-                issue_code="provider_invalid_json",
+                issue_code="ai_provider_error",
                 message="La respuesta del proveedor IA no pudo validarse.",
                 details=getattr(exc, "details", None),
                 actor=actor,
@@ -494,24 +495,11 @@ class DocumentPrecheckService:
                 request_id=request_id,
             )
         except AiProviderError as exc:
-            issue_code = {
-                "AI_PROVIDER_NOT_CONFIGURED": "ai_provider_not_configured",
-                "AI_PROVIDER_CONFIGURATION_ERROR": "ai_provider_not_configured",
-                "AI_PROVIDER_AUTH_ERROR": "ai_provider_auth_error",
-                "AI_PROVIDER_BAD_REQUEST": "ai_provider_bad_request",
-                "AI_PROVIDER_BILLING_ERROR": "ai_provider_billing_error",
-                "AI_PROVIDER_MODEL_NOT_FOUND": "ai_provider_model_not_found",
-                "AI_PROVIDER_JSON_SCHEMA_ERROR": "ai_provider_json_schema_error",
-                "AI_PROVIDER_TOKEN_LIMIT": "ai_provider_token_limit",
-                "AI_PROVIDER_TIMEOUT": "provider_timeout",
-                "AI_PROVIDER_RATE_LIMITED": "provider_rate_limited",
-                "AI_PROVIDER_INVALID_RESPONSE": "provider_invalid_json",
-            }.get(exc.code, "ai_provider_error")
             self._finish_provider_failure(
                 precheck,
                 document=document,
                 code=exc.code,
-                issue_code=issue_code,
+                issue_code="ai_provider_error",
                 message=str(exc) or "No fue posible completar la clasificacion IA.",
                 details=getattr(exc, "details", None),
                 actor=actor,
@@ -723,7 +711,8 @@ class DocumentPrecheckService:
         user_agent: str | None,
         request_id: str | None = None,
     ) -> None:
-        issue = build_issue(issue_code, message=message, metadata={"errorCode": code, **(details or {})})
+        safe_metadata = _ai_provider_issue_metadata(code=code, details=details)
+        issue = build_issue(issue_code, metadata=safe_metadata)
         logger.exception(
             "AI provider failure during document precheck",
             extra={
@@ -737,6 +726,9 @@ class DocumentPrecheckService:
                 "provider_status_code": (details or {}).get("statusCode"),
                 "provider_message": (details or {}).get("providerMessage"),
                 "provider_response_body": (details or {}).get("responseBody"),
+                "provider_error_code": code,
+                "provider_request_id": (details or {}).get("providerRequestId"),
+                "provider_trace_id": (details or {}).get("providerTraceId"),
             },
         )
         self._finish_without_ai(
@@ -746,7 +738,7 @@ class DocumentPrecheckService:
             status_value="error",
             decision="failed",
             traffic_light="red",
-            summary=message,
+            summary=AI_PROVIDER_FAILURE_SUMMARY,
             confidence_score=Decimal("0.0000"),
             actor=actor,
             ip_address=ip_address,
@@ -1044,6 +1036,7 @@ def _classification_input(
         "caseId": str(document.case_id),
         "documentId": str(document.id),
         "fileMetadata": {
+            "originalFilename": document.original_filename,
             "mimeType": document.mime_type,
             "pagesTotal": ocr_job.pages_total,
             "sizeBytes": document.size_bytes,
@@ -1156,6 +1149,35 @@ def _limited_text_fragment(text: str, *, limit: int) -> str:
     head_size = max(80, int(limit * 0.70))
     tail_size = max(40, limit - head_size - 8)
     return f"{text[:head_size]}\n...\n{text[-tail_size:]}"
+
+
+def _ai_provider_issue_metadata(
+    *,
+    code: str,
+    details: dict[str, Any] | None,
+) -> dict[str, Any]:
+    details = details or {}
+    retryable = code not in {
+        "AI_PROVIDER_AUTH_ERROR",
+        "AI_PROVIDER_NOT_CONFIGURED",
+        "AI_PROVIDER_CONFIGURATION_ERROR",
+        "AI_PROVIDER_MODEL_NOT_FOUND",
+        "AI_PROVIDER_BILLING_ERROR",
+    }
+    metadata: dict[str, Any] = {
+        "provider_error_code": code,
+        "retryable": retryable,
+    }
+    for source_key, target_key in [
+        ("statusCode", "provider_status_code"),
+        ("providerRequestId", "provider_request_id"),
+        ("providerTraceId", "provider_trace_id"),
+        ("attempt", "attempt"),
+    ]:
+        value = details.get(source_key)
+        if value is not None:
+            metadata[target_key] = value
+    return metadata
 
 
 def _ocr_characters(ocr_job: OcrJob) -> int:
