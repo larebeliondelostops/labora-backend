@@ -104,6 +104,30 @@ ISSUE_CATALOG: dict[str, dict[str, str]] = {
         "message": "No fue posible completar la clasificacion IA por un error tecnico.",
         "suggested_action": "wait_and_retry",
     },
+    "ai_provider_auth_error": {
+        "severity": "critical",
+        "title": "Credenciales IA rechazadas",
+        "message": "El proveedor IA rechazo las credenciales configuradas.",
+        "suggested_action": "contact_support",
+    },
+    "ai_provider_bad_request": {
+        "severity": "critical",
+        "title": "Solicitud IA invalida",
+        "message": "El proveedor IA rechazo el payload de clasificacion.",
+        "suggested_action": "contact_support",
+    },
+    "ai_provider_billing_error": {
+        "severity": "critical",
+        "title": "Proveedor IA sin saldo",
+        "message": "El proveedor IA rechazo la solicitud por facturacion o saldo.",
+        "suggested_action": "contact_support",
+    },
+    "ai_provider_model_not_found": {
+        "severity": "critical",
+        "title": "Modelo IA no encontrado",
+        "message": "El proveedor IA no encontro el modelo o endpoint configurado.",
+        "suggested_action": "contact_support",
+    },
     "storage_read_error": {
         "severity": "critical",
         "title": "Error leyendo almacenamiento",

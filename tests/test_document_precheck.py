@@ -591,6 +591,41 @@ def test_openai_compatible_provider_does_not_put_key_in_payload(monkeypatch) -> 
     assert result.output.confidence_score == 0.91
 
 
+def test_openai_compatible_provider_exposes_rejected_request_details(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 400
+        text = '{"error":{"message":"model does not support response_format"}}'
+
+        def json(self):
+            return {"error": {"message": "model does not support response_format"}}
+
+    def fake_post(url, *, json, headers, timeout):
+        return FakeResponse()
+
+    monkeypatch.setattr("app.services.ai_provider.requests.post", fake_post)
+    provider = OpenAiCompatibleProvider(
+        provider_name="deepseek",
+        base_url="https://api.example.test",
+        model="model-a",
+        api_key="secret-key",
+    )
+
+    with pytest.raises(AiProviderError) as exc_info:
+        provider.classify_document(
+            {
+                "caseId": str(uuid4()),
+                "documentId": str(uuid4()),
+                "fileMetadata": {"mimeType": "application/pdf", "pagesTotal": 1, "sizeBytes": 10},
+                "ocrSignals": {"textDetected": True, "avgTextDensity": 0.8, "pages": []},
+                "allowedDocumentTypes": ["historia_laboral"],
+            }
+        )
+
+    assert exc_info.value.code == "AI_PROVIDER_BAD_REQUEST"
+    assert exc_info.value.details["statusCode"] == 400
+    assert exc_info.value.details["providerMessage"] == "model does not support response_format"
+
+
 def _create_user(session_factory, *, role: str = "user"):
     db = session_factory()
     try:

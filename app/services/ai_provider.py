@@ -22,8 +22,9 @@ ALLOWED_DOCUMENT_TYPES = [
 
 
 class AiProviderError(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, details: dict[str, Any] | None = None) -> None:
         self.code = code
+        self.details = details or {}
         super().__init__(message)
 
 
@@ -280,11 +281,24 @@ class OpenAiCompatibleProvider:
             except requests.RequestException as exc:
                 raise AiProviderError("AI_PROVIDER_ERROR", "No fue posible comunicarse con el proveedor IA.") from exc
             if response.status_code == 429:
-                raise AiRateLimitedError("AI_PROVIDER_RATE_LIMITED", "El proveedor IA limito la solicitud.")
+                raise AiRateLimitedError(
+                    "AI_PROVIDER_RATE_LIMITED",
+                    "El proveedor IA limito la solicitud.",
+                    details=_provider_response_details(response),
+                )
             if response.status_code >= 500:
-                raise AiProviderError("AI_PROVIDER_UNAVAILABLE", "El proveedor IA no esta disponible.")
+                raise AiProviderError(
+                    "AI_PROVIDER_UNAVAILABLE",
+                    "El proveedor IA no esta disponible.",
+                    details=_provider_response_details(response),
+                )
             if response.status_code >= 400:
-                raise AiProviderError("AI_PROVIDER_ERROR", "El proveedor IA rechazo la solicitud.")
+                details = _provider_response_details(response)
+                raise AiProviderError(
+                    _provider_error_code(response.status_code),
+                    _provider_error_message(response.status_code, details),
+                    details=details,
+                )
             try:
                 response_json = response.json()
                 content = _extract_message_content(response_json)
@@ -410,3 +424,65 @@ def _external_issue(issue: dict[str, Any]) -> dict[str, Any]:
         "message": issue["message"],
         "suggestedAction": issue.get("suggested_action"),
     }
+
+
+def _provider_error_code(status_code: int) -> str:
+    if status_code in {401, 403}:
+        return "AI_PROVIDER_AUTH_ERROR"
+    if status_code == 402:
+        return "AI_PROVIDER_BILLING_ERROR"
+    if status_code == 404:
+        return "AI_PROVIDER_MODEL_NOT_FOUND"
+    if status_code == 400:
+        return "AI_PROVIDER_BAD_REQUEST"
+    return "AI_PROVIDER_ERROR"
+
+
+def _provider_error_message(status_code: int, details: dict[str, Any]) -> str:
+    provider_message = details.get("providerMessage")
+    if status_code in {401, 403}:
+        return provider_message or "El proveedor IA rechazo las credenciales configuradas."
+    if status_code == 402:
+        return provider_message or "El proveedor IA rechazo la solicitud por facturacion o saldo."
+    if status_code == 404:
+        return provider_message or "El proveedor IA no encontro el modelo o endpoint configurado."
+    if status_code == 400:
+        return provider_message or "El proveedor IA rechazo el payload de clasificacion."
+    return provider_message or "El proveedor IA rechazo la solicitud."
+
+
+def _provider_response_details(response) -> dict[str, Any]:
+    body = _safe_response_body(response)
+    details: dict[str, Any] = {
+        "statusCode": response.status_code,
+        "responseBody": body,
+    }
+    provider_message = _provider_message_from_body(response, body)
+    if provider_message:
+        details["providerMessage"] = provider_message
+    return details
+
+
+def _provider_message_from_body(response, fallback_body: str) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return fallback_body[:300] if fallback_body else None
+    if not isinstance(payload, dict):
+        return fallback_body[:300] if fallback_body else None
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("type") or error.get("code")
+        return str(message)[:300] if message else None
+    if isinstance(error, str):
+        return error[:300]
+    message = payload.get("message")
+    return str(message)[:300] if message else None
+
+
+def _safe_response_body(response) -> str:
+    try:
+        text = response.text
+    except Exception:
+        return ""
+    return text[:1200]

@@ -472,6 +472,7 @@ class DocumentPrecheckService:
                 code="AI_PROVIDER_INVALID_RESPONSE",
                 issue_code="provider_invalid_json",
                 message="La respuesta del proveedor IA no pudo validarse.",
+                details=getattr(exc, "details", None),
                 actor=actor,
                 ip_address=ip_address,
                 user_agent=user_agent,
@@ -480,6 +481,10 @@ class DocumentPrecheckService:
             issue_code = {
                 "AI_PROVIDER_NOT_CONFIGURED": "ai_provider_not_configured",
                 "AI_PROVIDER_CONFIGURATION_ERROR": "ai_provider_not_configured",
+                "AI_PROVIDER_AUTH_ERROR": "ai_provider_auth_error",
+                "AI_PROVIDER_BAD_REQUEST": "ai_provider_bad_request",
+                "AI_PROVIDER_BILLING_ERROR": "ai_provider_billing_error",
+                "AI_PROVIDER_MODEL_NOT_FOUND": "ai_provider_model_not_found",
                 "AI_PROVIDER_TIMEOUT": "provider_timeout",
                 "AI_PROVIDER_RATE_LIMITED": "provider_rate_limited",
                 "AI_PROVIDER_INVALID_RESPONSE": "provider_invalid_json",
@@ -490,6 +495,7 @@ class DocumentPrecheckService:
                 code=exc.code,
                 issue_code=issue_code,
                 message=str(exc) or "No fue posible completar la clasificacion IA.",
+                details=getattr(exc, "details", None),
                 actor=actor,
                 ip_address=ip_address,
                 user_agent=user_agent,
@@ -687,11 +693,12 @@ class DocumentPrecheckService:
         code: str,
         issue_code: str,
         message: str,
+        details: dict[str, Any] | None = None,
         actor: User,
         ip_address: str | None,
         user_agent: str | None,
     ) -> None:
-        issue = build_issue(issue_code)
+        issue = build_issue(issue_code, message=message, metadata={"errorCode": code, **(details or {})})
         logger.exception(
             "AI provider failure during document precheck",
             extra={
@@ -701,6 +708,9 @@ class DocumentPrecheckService:
                 "storage_key": document.storage_key,
                 "error_code": code,
                 "issue_code": issue_code,
+                "provider_status_code": (details or {}).get("statusCode"),
+                "provider_message": (details or {}).get("providerMessage"),
+                "provider_response_body": (details or {}).get("responseBody"),
             },
         )
         self._finish_without_ai(
