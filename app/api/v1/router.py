@@ -1,11 +1,13 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    analysis,
     auth,
     cases,
     consents,
     document_precheck,
     documents,
+    extraction,
     health,
     public,
     questionnaires,
@@ -56,6 +58,14 @@ api_router.include_router(
     document_precheck.admin_router,
     prefix="/admin",
     tags=["admin-document-precheck"],
+)
+api_router.include_router(
+    extraction.router,
+    tags=["extraction-validation"],
+)
+api_router.include_router(
+    analysis.router,
+    tags=["analysis"],
 )
 api_router.include_router(
     questionnaires.router,

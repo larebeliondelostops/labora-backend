@@ -78,6 +78,18 @@ class Settings(BaseSettings):
     AI_TEMPERATURE: float = 0
     AI_JSON_MODE: bool = True
 
+    AI_EXTRACTION_PROVIDER: str = "mock"
+    AI_EXTRACTION_MODEL: str = ""
+    AI_EXTRACTION_API_KEY: str = ""
+    AI_EXTRACTION_BASE_URL: str = ""
+    AI_EXTRACTION_TIMEOUT_MS: int = 60000
+    AI_EXTRACTION_CONFIDENCE_LOW: float = 0.65
+    AI_EXTRACTION_CONFIDENCE_BLOCKING: float = 0.50
+    EXTRACTION_JOB_MAX_RETRIES: int = 3
+    EXTRACTION_JOB_TIMEOUT_MS: int = 180000
+    EXTRACTION_ENABLE_REPROCESS: bool = True
+    EXTRACTION_PRESERVE_USER_CORRECTIONS: bool = True
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -322,6 +334,50 @@ class Settings(BaseSettings):
     @property
     def ai_json_mode(self) -> bool:
         return self.AI_JSON_MODE
+
+    @property
+    def ai_extraction_provider(self) -> str:
+        return (self.AI_EXTRACTION_PROVIDER or self.AI_PROVIDER or "mock").strip().lower()
+
+    @property
+    def ai_extraction_model(self) -> str:
+        return self.AI_EXTRACTION_MODEL or self.AI_MODEL
+
+    @property
+    def ai_extraction_api_key(self) -> str:
+        return self.AI_EXTRACTION_API_KEY or self.AI_API_KEY
+
+    @property
+    def ai_extraction_base_url(self) -> str:
+        return (self.AI_EXTRACTION_BASE_URL or self.AI_BASE_URL).rstrip("/")
+
+    @property
+    def ai_extraction_timeout_seconds(self) -> float:
+        return max(self.AI_EXTRACTION_TIMEOUT_MS, 1) / 1000
+
+    @property
+    def ai_extraction_confidence_low(self) -> float:
+        return self.AI_EXTRACTION_CONFIDENCE_LOW
+
+    @property
+    def ai_extraction_confidence_blocking(self) -> float:
+        return self.AI_EXTRACTION_CONFIDENCE_BLOCKING
+
+    @property
+    def extraction_job_max_retries(self) -> int:
+        return max(self.EXTRACTION_JOB_MAX_RETRIES, 0)
+
+    @property
+    def extraction_job_timeout_seconds(self) -> float:
+        return max(self.EXTRACTION_JOB_TIMEOUT_MS, 1) / 1000
+
+    @property
+    def extraction_enable_reprocess(self) -> bool:
+        return self.EXTRACTION_ENABLE_REPROCESS
+
+    @property
+    def extraction_preserve_user_corrections(self) -> bool:
+        return self.EXTRACTION_PRESERVE_USER_CORRECTIONS
 
 
 @lru_cache
