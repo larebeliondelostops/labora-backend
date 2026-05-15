@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -10,6 +11,8 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from app.core.config import settings
 from app.services.document_issue_service import build_issue
 
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_DOCUMENT_TYPES = [
     "historia_laboral",
@@ -222,15 +225,51 @@ class OpenAiCompatibleProvider:
     def classify_document(self, input_payload: dict[str, Any]) -> AiProviderResult:
         started = time.perf_counter()
         messages = build_classification_messages(input_payload)
+        context = {
+            **_request_log_context(input_payload),
+            "ai_provider": self.provider_name,
+            "ai_model": self.model,
+        }
         raw_payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "temperature": settings.ai_temperature,
         }
-        if settings.ai_json_mode:
+        response_format_enabled = settings.ai_json_mode and _supports_json_object_response_format(
+            provider_name=self.provider_name,
+            model=self.model,
+        )
+        if response_format_enabled:
             raw_payload["response_format"] = {"type": "json_object"}
 
-        response_json = self._post_chat_completion(raw_payload)
+        logger.info(
+            "Sending AI classification request",
+            extra={
+                **context,
+                "response_format_enabled": response_format_enabled,
+                "payload_hash": _hash_json(input_payload),
+                "payload_summary": _classification_payload_summary(input_payload),
+            },
+        )
+        try:
+            response_json = self._post_chat_completion(raw_payload, context=context)
+        except AiProviderError as exc:
+            if exc.code == "AI_PROVIDER_JSON_SCHEMA_ERROR" and "response_format" in raw_payload:
+                fallback_payload = {key: value for key, value in raw_payload.items() if key != "response_format"}
+                logger.warning(
+                    "AI provider rejected response_format; retrying without it",
+                    extra={
+                        **context,
+                        "provider_status_code": exc.details.get("statusCode"),
+                        "provider_message": exc.details.get("providerMessage"),
+                    },
+                )
+                response_json = self._post_chat_completion(
+                    fallback_payload,
+                    context={**context, "response_format_fallback": True},
+                )
+            else:
+                raise
         content = _extract_message_content(response_json)
         output = _parse_classification_json(content)
         usage = response_json.get("usage") if isinstance(response_json, dict) else {}
@@ -249,11 +288,17 @@ class OpenAiCompatibleProvider:
     def summarize_ocr_quality(self, input_payload: dict[str, Any]) -> AiProviderResult:
         return self.classify_document(input_payload)
 
-    def _post_chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_chat_completion(
+        self,
+        payload: dict[str, Any],
+        *,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
         url = f"{self.base_url}/chat/completions"
         attempts = max(settings.ai_max_retries, 0) + 1
         last_invalid: AiInvalidResponseError | None = None
         for attempt in range(attempts):
+            started = time.perf_counter()
             retry_payload = payload
             if attempt > 0 and last_invalid is not None:
                 retry_payload = {
@@ -277,37 +322,65 @@ class OpenAiCompatibleProvider:
                     timeout=settings.ai_timeout_seconds,
                 )
             except requests.Timeout as exc:
-                raise AiTimeoutError("AI_PROVIDER_TIMEOUT", "El proveedor IA no respondio a tiempo.") from exc
+                raise AiTimeoutError(
+                    "AI_PROVIDER_TIMEOUT",
+                    "El proveedor IA no respondio a tiempo.",
+                    details={**context, "attempt": attempt + 1},
+                ) from exc
             except requests.RequestException as exc:
-                raise AiProviderError("AI_PROVIDER_ERROR", "No fue posible comunicarse con el proveedor IA.") from exc
+                raise AiProviderError(
+                    "AI_PROVIDER_ERROR",
+                    "No fue posible comunicarse con el proveedor IA.",
+                    details={**context, "attempt": attempt + 1},
+                ) from exc
+            latency_ms = int((time.perf_counter() - started) * 1000)
             if response.status_code == 429:
+                details = {**_provider_response_details(response), **context, "attempt": attempt + 1}
+                _log_provider_error(details=details, latency_ms=latency_ms)
                 raise AiRateLimitedError(
                     "AI_PROVIDER_RATE_LIMITED",
                     "El proveedor IA limito la solicitud.",
-                    details=_provider_response_details(response),
+                    details=details,
                 )
             if response.status_code >= 500:
+                details = {**_provider_response_details(response), **context, "attempt": attempt + 1}
+                _log_provider_error(details=details, latency_ms=latency_ms)
                 raise AiProviderError(
                     "AI_PROVIDER_UNAVAILABLE",
                     "El proveedor IA no esta disponible.",
-                    details=_provider_response_details(response),
+                    details=details,
                 )
             if response.status_code >= 400:
-                details = _provider_response_details(response)
+                details = {**_provider_response_details(response), **context, "attempt": attempt + 1}
+                _log_provider_error(details=details, latency_ms=latency_ms)
+                code = _provider_error_code(response.status_code, details)
                 raise AiProviderError(
-                    _provider_error_code(response.status_code),
-                    _provider_error_message(response.status_code, details),
+                    code,
+                    _provider_error_message(code, details),
                     details=details,
                 )
             try:
                 response_json = response.json()
                 content = _extract_message_content(response_json)
                 _parse_classification_json(content)
+                usage = response_json.get("usage") if isinstance(response_json, dict) else {}
+                logger.info(
+                    "AI provider HTTP response accepted",
+                    extra={
+                        **context,
+                        "provider_status_code": response.status_code,
+                        "latency_ms": latency_ms,
+                        "tokens_input": usage.get("prompt_tokens") if isinstance(usage, dict) else None,
+                        "tokens_output": usage.get("completion_tokens") if isinstance(usage, dict) else None,
+                        "attempt": attempt + 1,
+                    },
+                )
                 return response_json
             except (ValueError, ValidationError, AiInvalidResponseError) as exc:
                 last_invalid = AiInvalidResponseError(
                     "AI_PROVIDER_INVALID_RESPONSE",
                     "El proveedor IA devolvio JSON invalido.",
+                    details={**context, "attempt": attempt + 1},
                 )
                 if attempt >= attempts - 1:
                     raise last_invalid from exc
@@ -345,7 +418,12 @@ def build_classification_messages(input_payload: dict[str, Any]) -> list[dict[st
                 "Devuelve exclusivamente JSON valido que cumpla el schema solicitado.\n"
                 "No incluyas markdown.\n"
                 "No incluyas explicacion fuera del JSON.\n"
-                "Si no hay suficiente informacion, usa baja confianza y solicita revision o nueva carga."
+                "Si no hay suficiente informacion, usa baja confianza y solicita revision o nueva carga.\n"
+                "El JSON debe tener exactamente estos campos principales: documentType, isLaborOrPensionRelated, "
+                "isSuitableForPreanalysis, trafficLight, confidenceScore, summary, detectedSignals, issues, "
+                "recommendedNextAction.\n"
+                "trafficLight solo puede ser green, yellow, red o gray. confidenceScore debe ser numero entre 0 y 1.\n"
+                "Cada issue debe tener code, severity, title, message, suggestedAction y opcionalmente pageNumber."
             ),
         },
         {
@@ -362,7 +440,7 @@ def ai_provider_factory() -> LlmProvider:
     if provider == "deepseek":
         return DeepSeekProvider(
             base_url=settings.ai_base_url or "https://api.deepseek.com",
-            model=settings.ai_model or "deepseek-v4-pro",
+            model=settings.ai_model or "deepseek-chat",
             api_key=settings.ai_api_key,
         )
     if provider == "kimi":
@@ -426,7 +504,21 @@ def _external_issue(issue: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _provider_error_code(status_code: int) -> str:
+def _provider_error_code(status_code: int, details: dict[str, Any]) -> str:
+    haystack = " ".join(
+        str(details.get(key, ""))
+        for key in ("responseBody", "providerMessage")
+    ).lower()
+    if status_code == 413 or any(
+        needle in haystack
+        for needle in ("maximum context", "context length", "token limit", "too many tokens", "tokens")
+    ):
+        return "AI_PROVIDER_TOKEN_LIMIT"
+    if status_code == 400 and any(
+        needle in haystack
+        for needle in ("response_format", "json_schema", "json schema", "schema", "json mode")
+    ):
+        return "AI_PROVIDER_JSON_SCHEMA_ERROR"
     if status_code in {401, 403}:
         return "AI_PROVIDER_AUTH_ERROR"
     if status_code == 402:
@@ -438,15 +530,19 @@ def _provider_error_code(status_code: int) -> str:
     return "AI_PROVIDER_ERROR"
 
 
-def _provider_error_message(status_code: int, details: dict[str, Any]) -> str:
+def _provider_error_message(code: str, details: dict[str, Any]) -> str:
     provider_message = details.get("providerMessage")
-    if status_code in {401, 403}:
+    if code == "AI_PROVIDER_AUTH_ERROR":
         return provider_message or "El proveedor IA rechazo las credenciales configuradas."
-    if status_code == 402:
+    if code == "AI_PROVIDER_BILLING_ERROR":
         return provider_message or "El proveedor IA rechazo la solicitud por facturacion o saldo."
-    if status_code == 404:
+    if code == "AI_PROVIDER_MODEL_NOT_FOUND":
         return provider_message or "El proveedor IA no encontro el modelo o endpoint configurado."
-    if status_code == 400:
+    if code == "AI_PROVIDER_TOKEN_LIMIT":
+        return provider_message or "El proveedor IA rechazo la solicitud por limite de tokens."
+    if code == "AI_PROVIDER_JSON_SCHEMA_ERROR":
+        return provider_message or "El proveedor IA rechazo el formato JSON solicitado."
+    if code == "AI_PROVIDER_BAD_REQUEST":
         return provider_message or "El proveedor IA rechazo el payload de clasificacion."
     return provider_message or "El proveedor IA rechazo la solicitud."
 
@@ -486,3 +582,61 @@ def _safe_response_body(response) -> str:
     except Exception:
         return ""
     return text[:1200]
+
+
+def _request_log_context(input_payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "request_id": input_payload.get("requestId"),
+        "case_id": input_payload.get("caseId"),
+        "document_id": input_payload.get("documentId"),
+        "precheck_id": input_payload.get("precheckId"),
+    }
+
+
+def _classification_payload_summary(input_payload: dict[str, Any]) -> dict[str, Any]:
+    pages = input_payload.get("ocrSignals", {}).get("pages", [])
+    return {
+        "textDetected": input_payload.get("ocrSignals", {}).get("textDetected"),
+        "avgTextDensity": input_payload.get("ocrSignals", {}).get("avgTextDensity"),
+        "pagesTotal": input_payload.get("fileMetadata", {}).get("pagesTotal"),
+        "pagesSent": len(pages) if isinstance(pages, list) else 0,
+        "totalPreviewChars": sum(len((page.get("textPreview") or "")) for page in pages if isinstance(page, dict)),
+        "pagePreviews": [
+            {
+                "pageNumber": page.get("pageNumber"),
+                "previewChars": len(page.get("textPreview") or ""),
+                "previewHash": hashlib.sha256((page.get("textPreview") or "").encode("utf-8")).hexdigest()
+                if page.get("textPreview")
+                else None,
+                "truncated": page.get("textPreviewTruncated"),
+            }
+            for page in pages
+            if isinstance(page, dict)
+        ],
+    }
+
+
+def _supports_json_object_response_format(*, provider_name: str, model: str) -> bool:
+    normalized_model = model.strip().lower()
+    if provider_name == "deepseek" and "reasoner" in normalized_model:
+        return False
+    return True
+
+
+def _log_provider_error(*, details: dict[str, Any], latency_ms: int) -> None:
+    logger.warning(
+        "AI provider HTTP response rejected",
+        extra={
+            "request_id": details.get("request_id"),
+            "case_id": details.get("case_id"),
+            "document_id": details.get("document_id"),
+            "precheck_id": details.get("precheck_id"),
+            "ai_provider": details.get("ai_provider"),
+            "ai_model": details.get("ai_model"),
+            "provider_status_code": details.get("statusCode"),
+            "provider_message": details.get("providerMessage"),
+            "provider_response_body": details.get("responseBody"),
+            "latency_ms": latency_ms,
+            "attempt": details.get("attempt"),
+        },
+    )

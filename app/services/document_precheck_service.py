@@ -37,6 +37,8 @@ ADMIN_ROLES = {"admin", "legal_admin"}
 LEGAL_REVIEWER_ROLES = {"legal_reviewer"}
 ACTIVE_PRECHECK_STATUSES = {"queued", "in_progress"}
 COMPLETE_DOCUMENT_STATUSES = {"uploaded", "processing", "validated", "requires_review", "rejected"}
+AI_PAGE_TEXT_PREVIEW_CHARS = 900
+AI_TOTAL_TEXT_PREVIEW_CHARS = 4500
 
 
 class DocumentPrecheckService:
@@ -338,6 +340,7 @@ class DocumentPrecheckService:
         ip_address: str | None,
         user_agent: str | None,
     ) -> None:
+        request_id = uuid.uuid4().hex
         previous_state = _precheck_state(precheck)
         precheck.status = "in_progress"
         precheck.started_at = utc_now()
@@ -348,6 +351,7 @@ class DocumentPrecheckService:
                 "case_id": str(precheck.case_id),
                 "document_id": str(document.id),
                 "precheck_id": str(precheck.id),
+                "request_id": request_id,
                 "storage_key": document.storage_key,
                 "document_size_bytes": document.size_bytes,
             },
@@ -383,6 +387,7 @@ class DocumentPrecheckService:
                         "case_id": str(precheck.case_id),
                         "document_id": str(document.id),
                         "precheck_id": str(precheck.id),
+                        "request_id": request_id,
                         "storage_key": document.storage_key,
                         "ocr_job_id": str(ocr_job.id),
                         "ocr_method": ocr_job.engine,
@@ -403,6 +408,7 @@ class DocumentPrecheckService:
                     actor=actor,
                     ip_address=ip_address,
                     user_agent=user_agent,
+                    request_id=request_id,
                 )
                 return
 
@@ -424,6 +430,7 @@ class DocumentPrecheckService:
                     "case_id": str(precheck.case_id),
                     "document_id": str(document.id),
                     "precheck_id": str(precheck.id),
+                    "request_id": request_id,
                     "storage_key": document.storage_key,
                     "ocr_method": ocr_job.engine,
                     "pages_processed": ocr_job.pages_processed,
@@ -432,7 +439,13 @@ class DocumentPrecheckService:
                     "ai_model": provider_model,
                 },
             )
-            ai_result = provider.classify_document(_classification_input(document=document, ocr_job=ocr_job))
+            classification_payload = _classification_input(
+                document=document,
+                ocr_job=ocr_job,
+                precheck_id=precheck.id,
+                request_id=request_id,
+            )
+            ai_result = provider.classify_document(classification_payload)
             self._persist_ai_result(
                 precheck,
                 document=document,
@@ -453,6 +466,7 @@ class DocumentPrecheckService:
                 actor=actor,
                 ip_address=ip_address,
                 user_agent=user_agent,
+                request_id=request_id,
             )
         except OcrPreviewError as exc:
             self._finish_technical_failure(
@@ -464,6 +478,7 @@ class DocumentPrecheckService:
                 actor=actor,
                 ip_address=ip_address,
                 user_agent=user_agent,
+                request_id=request_id,
             )
         except AiInvalidResponseError as exc:
             self._finish_provider_failure(
@@ -476,6 +491,7 @@ class DocumentPrecheckService:
                 actor=actor,
                 ip_address=ip_address,
                 user_agent=user_agent,
+                request_id=request_id,
             )
         except AiProviderError as exc:
             issue_code = {
@@ -485,6 +501,8 @@ class DocumentPrecheckService:
                 "AI_PROVIDER_BAD_REQUEST": "ai_provider_bad_request",
                 "AI_PROVIDER_BILLING_ERROR": "ai_provider_billing_error",
                 "AI_PROVIDER_MODEL_NOT_FOUND": "ai_provider_model_not_found",
+                "AI_PROVIDER_JSON_SCHEMA_ERROR": "ai_provider_json_schema_error",
+                "AI_PROVIDER_TOKEN_LIMIT": "ai_provider_token_limit",
                 "AI_PROVIDER_TIMEOUT": "provider_timeout",
                 "AI_PROVIDER_RATE_LIMITED": "provider_rate_limited",
                 "AI_PROVIDER_INVALID_RESPONSE": "provider_invalid_json",
@@ -499,6 +517,7 @@ class DocumentPrecheckService:
                 actor=actor,
                 ip_address=ip_address,
                 user_agent=user_agent,
+                request_id=request_id,
             )
 
     def _finish_without_ai(
@@ -517,6 +536,7 @@ class DocumentPrecheckService:
         user_agent: str | None,
         error_code: str | None = None,
         error_message: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         previous_state = _precheck_state(precheck)
         precheck.status = status_value
@@ -537,6 +557,7 @@ class DocumentPrecheckService:
                 "case_id": str(precheck.case_id),
                 "document_id": str(document.id),
                 "precheck_id": str(precheck.id),
+                "request_id": request_id,
                 "storage_key": document.storage_key,
                 "status": precheck.status,
                 "decision": precheck.decision,
@@ -657,6 +678,7 @@ class DocumentPrecheckService:
         actor: User,
         ip_address: str | None,
         user_agent: str | None,
+        request_id: str | None = None,
     ) -> None:
         logger.exception(
             "Document precheck technical failure",
@@ -664,6 +686,7 @@ class DocumentPrecheckService:
                 "case_id": str(precheck.case_id),
                 "document_id": str(document.id),
                 "precheck_id": str(precheck.id),
+                "request_id": request_id,
                 "storage_key": document.storage_key,
                 "error_code": code,
                 "issue_code": issue_code,
@@ -683,6 +706,7 @@ class DocumentPrecheckService:
             user_agent=user_agent,
             error_code=code,
             error_message=message,
+            request_id=request_id,
         )
 
     def _finish_provider_failure(
@@ -697,6 +721,7 @@ class DocumentPrecheckService:
         actor: User,
         ip_address: str | None,
         user_agent: str | None,
+        request_id: str | None = None,
     ) -> None:
         issue = build_issue(issue_code, message=message, metadata={"errorCode": code, **(details or {})})
         logger.exception(
@@ -705,6 +730,7 @@ class DocumentPrecheckService:
                 "case_id": str(precheck.case_id),
                 "document_id": str(document.id),
                 "precheck_id": str(precheck.id),
+                "request_id": request_id,
                 "storage_key": document.storage_key,
                 "error_code": code,
                 "issue_code": issue_code,
@@ -727,6 +753,7 @@ class DocumentPrecheckService:
             user_agent=user_agent,
             error_code=code,
             error_message=message,
+            request_id=request_id,
         )
 
     def _audit_terminal(
@@ -980,19 +1007,40 @@ class DocumentPrecheckService:
         )
 
 
-def _classification_input(*, document: Document, ocr_job: OcrJob) -> dict[str, Any]:
-    pages = [
-        {
-            "pageNumber": page.page_number,
-            "textPreview": page.text_preview,
-            "confidenceScore": _float(page.confidence_score),
-            "isBlurry": page.is_blurry,
-            "isRotated": page.is_rotated,
-            "hasTableLikeContent": page.has_table_like_content,
-        }
-        for page in sorted(ocr_job.pages, key=lambda item: item.page_number)
-    ]
+def _classification_input(
+    *,
+    document: Document,
+    ocr_job: OcrJob,
+    precheck_id: uuid.UUID,
+    request_id: str,
+) -> dict[str, Any]:
+    pages: list[dict[str, Any]] = []
+    remaining_chars = AI_TOTAL_TEXT_PREVIEW_CHARS
+    for page in sorted(ocr_job.pages, key=lambda item: item.page_number):
+        raw_preview = page.text_preview or ""
+        page_limit = min(AI_PAGE_TEXT_PREVIEW_CHARS, max(remaining_chars, 0))
+        limited_preview = _limited_text_fragment(raw_preview, limit=page_limit)
+        remaining_chars -= len(limited_preview)
+        pages.append(
+            {
+                "pageNumber": page.page_number,
+                "textPreview": limited_preview,
+                "textPreviewChars": len(limited_preview),
+                "textPreviewOriginalChars": len(raw_preview),
+                "textPreviewTruncated": len(limited_preview) < len(raw_preview),
+                "confidenceScore": _float(page.confidence_score),
+                "textDensity": _float(page.text_density),
+                "isBlurry": page.is_blurry,
+                "isRotated": page.is_rotated,
+                "hasTableLikeContent": page.has_table_like_content,
+                "detectedLabels": page.detected_labels or [],
+            }
+        )
+        if remaining_chars <= 0:
+            break
     return {
+        "requestId": request_id,
+        "precheckId": str(precheck_id),
         "caseId": str(document.case_id),
         "documentId": str(document.id),
         "fileMetadata": {
@@ -1029,8 +1077,14 @@ def _decision_from_result(
     issues: list[dict[str, Any]],
 ) -> str:
     if any(issue["severity"] == "critical" for issue in issues):
-        reupload_codes = {
+        unsupported_codes = {
             "file_unsupported",
+            "wrong_document_type",
+            "not_labor_or_pension_document",
+        }
+        if any(issue["code"] in unsupported_codes for issue in issues):
+            return "unsupported"
+        reupload_codes = {
             "pdf_password_protected",
             "pdf_corrupted",
             "no_text_detected",
@@ -1090,6 +1144,18 @@ def _dedupe_issues(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(key)
         deduped.append(issue)
     return deduped
+
+
+def _limited_text_fragment(text: str, *, limit: int) -> str:
+    if limit <= 0 or not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit < 120:
+        return text[:limit]
+    head_size = max(80, int(limit * 0.70))
+    tail_size = max(40, limit - head_size - 8)
+    return f"{text[:head_size]}\n...\n{text[-tail_size:]}"
 
 
 def _ocr_characters(ocr_job: OcrJob) -> int:

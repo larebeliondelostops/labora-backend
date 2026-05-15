@@ -293,6 +293,33 @@ def test_document_precheck_textless_pdf_requires_reupload(client_and_session) ->
     assert {issue["code"] for issue in data["issues"]} >= {"no_text_detected", "ocr_provider_not_configured"}
 
 
+def test_document_precheck_wrong_document_type_is_unsupported(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    document_id = _create_document_row(
+        session_factory,
+        user_id=user_id,
+        case_id=UUID(case_id),
+        content=_wrong_document_pdf(),
+    )
+
+    response = client.post(
+        f"/api/v1/cases/{case_id}/document-precheck",
+        json={"documentId": document_id},
+        headers=headers,
+    )
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "blocked"
+    assert data["decision"] == "unsupported"
+    assert data["trafficLight"] == "red"
+    assert data["ocr"]["textDetected"] is True
+    assert {issue["code"] for issue in data["issues"]} >= {"not_labor_or_pension_document"}
+
+
 def test_document_precheck_storage_read_error_is_technical_failure(client_and_session, monkeypatch) -> None:
     client, session_factory = client_and_session
     user_id, headers = _create_user(session_factory)
@@ -455,8 +482,15 @@ def test_ai_provider_error_marks_precheck_as_error(client_and_session, monkeypat
     )
 
     class FailingProvider:
+        provider_name = "fake"
+        model = "fake-model"
+
         def classify_document(self, input_payload):
-            raise AiProviderError("AI_PROVIDER_NOT_CONFIGURED", "Falta AI_API_KEY.")
+            raise AiProviderError(
+                "AI_PROVIDER_ERROR",
+                "Proveedor temporalmente indisponible.",
+                details={"statusCode": 502, "providerMessage": "bad gateway"},
+            )
 
     monkeypatch.setattr(
         "app.services.document_precheck_service.ai_provider_factory",
@@ -474,7 +508,67 @@ def test_ai_provider_error_marks_precheck_as_error(client_and_session, monkeypat
     assert data["status"] == "error"
     assert data["decision"] == "failed"
     assert data["trafficLight"] == "red"
-    assert data["issues"][0]["code"] == "ai_provider_not_configured"
+    assert data["ocr"]["textDetected"] is True
+    assert data["issues"][0]["code"] == "ai_provider_error"
+    assert data["issues"][0]["suggestedAction"] == "wait_and_retry"
+
+
+def test_force_true_retries_failed_precheck(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    document_id = _create_document_row(
+        session_factory,
+        user_id=user_id,
+        case_id=UUID(case_id),
+        content=_labor_history_pdf(),
+    )
+
+    class FlakyProvider:
+        provider_name = "fake"
+        model = "fake-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def classify_document(self, input_payload):
+            self.calls += 1
+            if self.calls == 1:
+                raise AiProviderError("AI_PROVIDER_ERROR", "Fallo temporal.")
+            return MockAiProvider().classify_document(input_payload)
+
+    provider = FlakyProvider()
+    monkeypatch.setattr(
+        "app.services.document_precheck_service.ai_provider_factory",
+        lambda: provider,
+    )
+
+    failed = client.post(
+        f"/api/v1/cases/{case_id}/document-precheck",
+        json={"documentId": document_id},
+        headers=headers,
+    )
+    retried = client.post(
+        f"/api/v1/cases/{case_id}/document-precheck",
+        json={"documentId": document_id, "force": True},
+        headers=headers,
+    )
+
+    assert failed.status_code == 202
+    assert failed.json()["status"] == "error"
+    assert retried.status_code == 202
+    assert retried.json()["status"] == "completed"
+    assert retried.json()["decision"] == "suitable"
+    assert retried.json()["precheckId"] != failed.json()["precheckId"]
+
+    latest = client.get(
+        f"/api/v1/cases/{case_id}/document-precheck",
+        params={"documentId": document_id, "latest": True},
+        headers=headers,
+    )
+    assert latest.status_code == 200
+    assert latest.json()["items"][0]["precheckId"] == retried.json()["precheckId"]
 
 
 def test_ambiguous_document_requires_human_review_with_yellow_light(client_and_session) -> None:
@@ -593,11 +687,11 @@ def test_openai_compatible_provider_does_not_put_key_in_payload(monkeypatch) -> 
 
 def test_openai_compatible_provider_exposes_rejected_request_details(monkeypatch) -> None:
     class FakeResponse:
-        status_code = 400
-        text = '{"error":{"message":"model does not support response_format"}}'
+        status_code = 404
+        text = '{"error":{"message":"model not found"}}'
 
         def json(self):
-            return {"error": {"message": "model does not support response_format"}}
+            return {"error": {"message": "model not found"}}
 
     def fake_post(url, *, json, headers, timeout):
         return FakeResponse()
@@ -621,9 +715,75 @@ def test_openai_compatible_provider_exposes_rejected_request_details(monkeypatch
             }
         )
 
-    assert exc_info.value.code == "AI_PROVIDER_BAD_REQUEST"
-    assert exc_info.value.details["statusCode"] == 400
-    assert exc_info.value.details["providerMessage"] == "model does not support response_format"
+    assert exc_info.value.code == "AI_PROVIDER_MODEL_NOT_FOUND"
+    assert exc_info.value.details["statusCode"] == 404
+    assert exc_info.value.details["providerMessage"] == "model not found"
+
+
+def test_openai_compatible_provider_retries_without_response_format(monkeypatch) -> None:
+    calls = []
+
+    class RejectedResponseFormat:
+        status_code = 400
+        text = '{"error":{"message":"model does not support response_format"}}'
+
+        def json(self):
+            return {"error": {"message": "model does not support response_format"}}
+
+    class AcceptedResponse:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"documentType":"historia_laboral",'
+                                '"isLaborOrPensionRelated":true,'
+                                '"isSuitableForPreanalysis":true,'
+                                '"trafficLight":"green",'
+                                '"confidenceScore":0.91,'
+                                '"summary":"Documento apto.",'
+                                '"detectedSignals":["semanas"],'
+                                '"issues":[],'
+                                '"recommendedNextAction":"continue"}'
+                            )
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+            }
+
+    def fake_post(url, *, json, headers, timeout):
+        calls.append(json)
+        return RejectedResponseFormat() if len(calls) == 1 else AcceptedResponse()
+
+    monkeypatch.setattr(settings, "AI_JSON_MODE", True)
+    monkeypatch.setattr("app.services.ai_provider.requests.post", fake_post)
+    provider = OpenAiCompatibleProvider(
+        provider_name="deepseek",
+        base_url="https://api.example.test",
+        model="deepseek-chat",
+        api_key="secret-key",
+    )
+
+    result = provider.classify_document(
+        {
+            "requestId": str(uuid4()),
+            "precheckId": str(uuid4()),
+            "caseId": str(uuid4()),
+            "documentId": str(uuid4()),
+            "fileMetadata": {"mimeType": "application/pdf", "pagesTotal": 1, "sizeBytes": 10},
+            "ocrSignals": {"textDetected": True, "avgTextDensity": 0.8, "pages": []},
+            "allowedDocumentTypes": ["historia_laboral"],
+        }
+    )
+
+    assert "response_format" in calls[0]
+    assert "response_format" not in calls[1]
+    assert result.output.confidence_score == 0.91
 
 
 def _create_user(session_factory, *, role: str = "user"):
@@ -817,6 +977,15 @@ def _textless_pdf() -> bytes:
         b"2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>> endobj\n"
         b"3 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>> endobj\n"
         b"xref\ntrailer\n%%EOF"
+    )
+
+
+def _wrong_document_pdf() -> bytes:
+    return (
+        b"%PDF-1.4\n"
+        b"1 0 obj <</Type /Catalog>> endobj\n"
+        b"2 0 obj <</Type /Page>> endobj\n"
+        b"contrato de arrendamiento inmueble canon mensual deposito inventario llaves\n%%EOF"
     )
 
 
