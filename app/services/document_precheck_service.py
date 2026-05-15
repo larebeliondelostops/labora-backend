@@ -372,7 +372,7 @@ class DocumentPrecheckService:
             ocr_job = OcrPreviewService(self.db).create_preview(
                 document,
                 actor=actor,
-                max_pages=5,
+                max_pages=0,
                 include_text_preview=True,
                 force=True,
                 precheck_id=precheck.id,
@@ -1007,12 +1007,21 @@ def _classification_input(
     request_id: str,
 ) -> dict[str, Any]:
     pages: list[dict[str, Any]] = []
-    remaining_chars = AI_TOTAL_TEXT_PREVIEW_CHARS
-    for page in sorted(ocr_job.pages, key=lambda item: item.page_number):
+    sorted_pages = sorted(ocr_job.pages, key=lambda item: item.page_number)
+    pages_with_text = sum(1 for page in sorted_pages if page.text_preview)
+    per_page_budget = AI_PAGE_TEXT_PREVIEW_CHARS
+    if pages_with_text > 0:
+        per_page_budget = min(
+            AI_PAGE_TEXT_PREVIEW_CHARS,
+            max(300, AI_TOTAL_TEXT_PREVIEW_CHARS // pages_with_text),
+        )
+    total_preview_chars = 0
+    for page in sorted_pages:
         raw_preview = page.text_preview or ""
-        page_limit = min(AI_PAGE_TEXT_PREVIEW_CHARS, max(remaining_chars, 0))
+        remaining_chars = max(AI_TOTAL_TEXT_PREVIEW_CHARS - total_preview_chars, 0)
+        page_limit = min(per_page_budget, remaining_chars)
         limited_preview = _limited_text_fragment(raw_preview, limit=page_limit)
-        remaining_chars -= len(limited_preview)
+        total_preview_chars += len(limited_preview)
         pages.append(
             {
                 "pageNumber": page.page_number,
@@ -1028,8 +1037,6 @@ def _classification_input(
                 "detectedLabels": page.detected_labels or [],
             }
         )
-        if remaining_chars <= 0:
-            break
     return {
         "requestId": request_id,
         "precheckId": str(precheck_id),
@@ -1044,6 +1051,10 @@ def _classification_input(
         "ocrSignals": {
             "textDetected": ocr_job.text_detected,
             "avgTextDensity": _float(ocr_job.avg_text_density),
+            "pagesTotal": ocr_job.pages_total,
+            "pagesProcessed": len(sorted_pages),
+            "totalExtractedChars": _ocr_characters(ocr_job),
+            "totalPreviewCharsSent": total_preview_chars,
             "pages": pages,
         },
         "allowedDocumentTypes": ALLOWED_DOCUMENT_TYPES,

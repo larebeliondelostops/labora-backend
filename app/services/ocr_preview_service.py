@@ -247,12 +247,11 @@ def _inspect_pdf(
         issue = build_issue("pdf_password_protected", severity="critical")
         return _single_issue_pdf(issue)
 
-    pages_total = max(len(re.findall(rb"/Type\s*/Page\b", content)), 1)
-    text, engine = _extract_pdf_text(content)
-    page_chunks = _split_text_into_pages(text, max_pages=min(max_pages, pages_total))
+    page_texts, engine, pages_total = _extract_pdf_pages(content)
+    pages_to_process = pages_total if max_pages <= 0 else min(max_pages, pages_total)
     pages: list[dict[str, Any]] = []
-    for index in range(min(max_pages, pages_total)):
-        page_text = page_chunks[index] if index < len(page_chunks) else ""
+    for index in range(pages_to_process):
+        page_text = page_texts[index] if index < len(page_texts) else ""
         density = _text_density(page_text)
         page_issues: list[dict[str, Any]] = []
         is_blurry = False
@@ -264,7 +263,7 @@ def _inspect_pdf(
         elif density < 0.08:
             is_blurry = True
             page_issues.append(build_issue("page_blurry", page_number=index + 1))
-        preview = page_text[:1200] if include_text_preview else None
+        preview = page_text if include_text_preview else None
         pages.append(
             {
                 "page_number": index + 1,
@@ -285,15 +284,16 @@ def _inspect_pdf(
         "engine": engine,
         "pages_total": pages_total,
         "pages": pages,
-        "text_detected": bool(text.strip()),
+        "text_detected": any(text.strip() for text in page_texts),
         "avg_text_density": round(avg_density, 4),
-        "characters_extracted": len(text),
+        "characters_extracted": sum(len(text) for text in page_texts),
         "issues": [issue for page in pages for issue in page["issues"]],
     }
 
 
 def _inspect_image(*, max_pages: int) -> dict[str, Any]:
     issue = build_issue("no_text_detected", page_number=1)
+    pages_to_process = 1 if max_pages <= 0 else max_pages
     return {
         "engine": "ocr_engine_not_configured",
         "pages_total": 1,
@@ -311,7 +311,7 @@ def _inspect_image(*, max_pages: int) -> dict[str, Any]:
                 "detected_labels": [],
                 "issues": [issue],
             }
-        ][:max_pages],
+        ][:pages_to_process],
         "text_detected": False,
         "avg_text_density": 0.0,
         "characters_extracted": 0,
@@ -345,31 +345,36 @@ def _single_issue_pdf(issue: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _extract_pdf_text(content: bytes) -> tuple[str, str]:
-    text = _extract_text_with_pypdf(content)
-    if text:
-        return text, "embedded_text"
+def _extract_pdf_pages(content: bytes) -> tuple[list[str], str, int]:
+    page_texts = _extract_page_texts_with_pypdf(content)
+    if page_texts:
+        return page_texts, "embedded_text", len(page_texts)
+
+    pages_total = max(len(re.findall(rb"/Type\s*/Page\b", content)), 1)
     text = _extract_text_sample(content)
     if text:
-        return text, "embedded_text"
-    return "", "ocr_engine_not_configured"
+        return _split_text_into_pages(text, max_pages=pages_total), "embedded_text", pages_total
+    return ["" for _ in range(pages_total)], "ocr_engine_not_configured", pages_total
 
 
-def _extract_text_with_pypdf(content: bytes) -> str:
+def _extract_page_texts_with_pypdf(content: bytes) -> list[str]:
     try:
         from pypdf import PdfReader
     except ImportError:
-        return ""
+        return []
     try:
         reader = PdfReader(io.BytesIO(content))
-        page_text = "\n".join((page.extract_text() or "") for page in reader.pages[:20])
+        page_texts = [
+            re.sub(r"\s+", " ", page.extract_text() or "").strip()
+            for page in reader.pages
+        ]
     except Exception:
-        return ""
-    return re.sub(r"\s+", " ", page_text).strip()[:12000]
+        return []
+    return page_texts if any(text.strip() for text in page_texts) else []
 
 
 def _extract_text_sample(content: bytes) -> str:
-    decoded = content[:200000].decode("latin-1", errors="ignore")
+    decoded = content.decode("latin-1", errors="ignore")
     printable = re.sub(r"[^\x20-\x7E\n\r\t]+", " ", decoded)
     without_streams = re.sub(r"stream.*?endstream", " ", printable, flags=re.IGNORECASE | re.DOTALL)
     stripped = re.sub(r"\b(?:obj|endobj|xref|trailer|startxref|Catalog|Pages?|Type|Root|Kids|Count|MediaBox|Parent)\b", " ", without_streams)
@@ -377,7 +382,7 @@ def _extract_text_sample(content: bytes) -> str:
     compact = re.sub(r"\s+", " ", stripped).strip()
     if len(re.findall(r"[A-Za-z]{3,}", compact)) < 3:
         return ""
-    return compact[:12000]
+    return compact
 
 
 def _split_text_into_pages(text: str, *, max_pages: int) -> list[str]:

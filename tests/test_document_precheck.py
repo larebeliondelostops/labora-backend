@@ -55,6 +55,7 @@ from app.services.consent_service import (
 )
 from app.services.document_storage_service import DocumentStorageService, StorageProviderError
 from app.services.document_precheck_service import _classification_input
+from app.services.ocr_preview_service import inspect_document_content
 from app.utils.dates import utc_now
 
 
@@ -617,10 +618,38 @@ def test_classification_payload_trims_large_ocr_text() -> None:
     pages = payload["ocrSignals"]["pages"]
 
     assert payload["fileMetadata"]["originalFilename"] == "historia-laboral.pdf"
+    assert len(pages) == 10
+    assert payload["ocrSignals"]["pagesProcessed"] == 10
     assert sum(len(page["textPreview"]) for page in pages) <= 12000
     assert all(len(page["textPreview"]) <= 2000 for page in pages)
     assert any(page["textPreviewTruncated"] for page in pages)
     assert "historia laboral" in " ".join(page["textPreview"].lower() for page in pages)
+
+
+def test_pdf_inspector_processes_all_pages_when_requested() -> None:
+    document = SimpleNamespace(mime_type="application/pdf")
+    content = (
+        b"%PDF-1.4\n"
+        b"1 0 obj <</Type /Catalog>> endobj\n"
+        b"2 0 obj <</Type /Page>> endobj\n"
+        b"3 0 obj <</Type /Page>> endobj\n"
+        b"4 0 obj <</Type /Page>> endobj\n"
+        b"historia laboral semanas cotizadas pagina uno "
+        b"historia laboral semanas cotizadas pagina dos "
+        b"historia laboral semanas cotizadas pagina tres\n%%EOF"
+    )
+
+    result = inspect_document_content(
+        document=document,
+        content=content,
+        max_pages=0,
+        include_text_preview=True,
+    )
+
+    assert result["pages_total"] == 3
+    assert len(result["pages"]) == 3
+    assert result["text_detected"] is True
+    assert result["characters_extracted"] > 0
 
 
 def test_ambiguous_document_requires_human_review_with_yellow_light(client_and_session) -> None:
