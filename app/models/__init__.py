@@ -50,6 +50,14 @@ from app.models.otp_code import OTPCode
 from app.models.password_reset_token import PasswordResetToken
 from app.models.public_content import PublicContent
 from app.models.public_event import PublicEvent
+from app.models.pre_analysis import (
+    CaseSignal,
+    MissingDocument,
+    PreAnalysis,
+    PreAnalysisJob,
+    PreIssue,
+    PreViability,
+)
 from app.models.questionnaire import (
     AiQuestionnaireEvent,
     AnswerVersion,
@@ -72,6 +80,7 @@ __all__ = [
     "CaseHistoryEvent",
     "CaseOwner",
     "CaseProfile",
+    "CaseSignal",
     "CaseQuestionnaireSession",
     "CaseStatusHistory",
     "CaseTag",
@@ -103,11 +112,16 @@ __all__ = [
     "LaborNovelty",
     "LaborPeriod",
     "LaboraCase",
+    "MissingDocument",
     "OAuthState",
     "OcrJob",
     "OcrPageResult",
     "OTPCode",
     "PasswordResetToken",
+    "PreAnalysis",
+    "PreAnalysisJob",
+    "PreIssue",
+    "PreViability",
     "PublicContent",
     "PublicEvent",
     "Question",

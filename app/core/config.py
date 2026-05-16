@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     EXTRACTION_ENABLE_REPROCESS: bool = True
     EXTRACTION_PRESERVE_USER_CORRECTIONS: bool = True
 
+    AI_PRE_ANALYSIS_PROVIDER: str = "mock"
+    AI_PRE_ANALYSIS_MODEL: str = ""
+    AI_PRE_ANALYSIS_API_KEY: str = ""
+    AI_PRE_ANALYSIS_BASE_URL: str = ""
+    AI_PRE_ANALYSIS_TIMEOUT_MS: int = 60000
+    PRE_ANALYSIS_JOB_MAX_ATTEMPTS: int = 3
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -378,6 +385,30 @@ class Settings(BaseSettings):
     @property
     def extraction_preserve_user_corrections(self) -> bool:
         return self.EXTRACTION_PRESERVE_USER_CORRECTIONS
+
+    @property
+    def ai_pre_analysis_provider(self) -> str:
+        return (self.AI_PRE_ANALYSIS_PROVIDER or self.AI_PROVIDER or "mock").strip().lower()
+
+    @property
+    def ai_pre_analysis_model(self) -> str:
+        return self.AI_PRE_ANALYSIS_MODEL or self.AI_MODEL
+
+    @property
+    def ai_pre_analysis_api_key(self) -> str:
+        return self.AI_PRE_ANALYSIS_API_KEY or self.AI_API_KEY
+
+    @property
+    def ai_pre_analysis_base_url(self) -> str:
+        return (self.AI_PRE_ANALYSIS_BASE_URL or self.AI_BASE_URL).rstrip("/")
+
+    @property
+    def ai_pre_analysis_timeout_seconds(self) -> float:
+        return max(self.AI_PRE_ANALYSIS_TIMEOUT_MS, 1) / 1000
+
+    @property
+    def pre_analysis_job_max_attempts(self) -> int:
+        return max(self.PRE_ANALYSIS_JOB_MAX_ATTEMPTS, 1)
 
 
 @lru_cache

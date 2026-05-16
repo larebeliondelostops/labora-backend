@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
     documents,
     extraction,
     health,
+    pre_analysis,
     public,
     questionnaires,
     users,
@@ -66,6 +67,15 @@ api_router.include_router(
 api_router.include_router(
     analysis.router,
     tags=["analysis"],
+)
+api_router.include_router(
+    pre_analysis.router,
+    tags=["pre-analysis"],
+)
+api_router.include_router(
+    pre_analysis.admin_router,
+    prefix="/admin",
+    tags=["admin-pre-analysis"],
 )
 api_router.include_router(
     questionnaires.router,
