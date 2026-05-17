@@ -95,6 +95,14 @@ from app.models.questionnaire import (
     QuestionnaireTemplate,
     QuestionOption,
 )
+from app.models.report import (
+    ExportFile,
+    Report,
+    ReportGenerationJob,
+    ReportSection,
+    ReportTemplate,
+    ReportVersion,
+)
 from app.models.session import Session
 from app.models.user import User
 from app.models.visitor_intent import VisitorIntent
@@ -133,6 +141,7 @@ __all__ = [
     "ExtractionIssue",
     "ExtractionJob",
     "ExtractionRun",
+    "ExportFile",
     "ExternalAuthAccount",
     "FaqItem",
     "FileUpload",
@@ -172,6 +181,11 @@ __all__ = [
     "QuestionOption",
     "Receipt",
     "RecommendedRoute",
+    "Report",
+    "ReportGenerationJob",
+    "ReportSection",
+    "ReportTemplate",
+    "ReportVersion",
     "ResultAuditEvent",
     "ResultCard",
     "ResultInconsistency",

@@ -16,6 +16,7 @@ from app.api.v1.endpoints import (
     pre_analysis,
     public,
     questionnaires,
+    reports,
     users,
 )
 
@@ -93,6 +94,10 @@ api_router.include_router(
 api_router.include_router(
     case_results.router,
     tags=["case-results"],
+)
+api_router.include_router(
+    reports.router,
+    tags=["reports"],
 )
 api_router.include_router(
     paywall.router,
