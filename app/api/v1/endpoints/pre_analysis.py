@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -28,20 +28,32 @@ admin_router = APIRouter()
 @router.post("/cases/{case_id}/pre-analysis")
 def create_pre_analysis(
     case_id: str,
-    payload: PreAnalysisCreateRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
+    payload: PreAnalysisCreateRequest | None = Body(default=None),
     context=Depends(get_current_user_context),
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     user, _token_payload = context
+    payload = payload or PreAnalysisCreateRequest()
+    ip_address = get_client_ip(request)
+    user_agent = get_user_agent(request)
     body, status_code = PreAnalysisService(db).create_or_reuse(
         case_id,
         force_regenerate=payload.force_regenerate,
         source=payload.source,
         user=user,
-        ip_address=get_client_ip(request),
-        user_agent=get_user_agent(request),
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
+    if status_code == 202 and body.get("preAnalysisId"):
+        background_tasks.add_task(
+            PreAnalysisService(db).run,
+            body["preAnalysisId"],
+            actor=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
     return JSONResponse(status_code=status_code, content=body)
 
 

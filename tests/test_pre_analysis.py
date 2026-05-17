@@ -80,7 +80,6 @@ def test_pre_analysis_queue_run_result_and_reuse(client_and_session) -> None:
 
     created = client.post(
         f"/api/v1/cases/{case_id}/pre-analysis",
-        json={"forceRegenerate": False, "source": "user_request"},
         headers=headers,
     )
 
@@ -94,7 +93,7 @@ def test_pre_analysis_queue_run_result_and_reuse(client_and_session) -> None:
         headers=headers,
     )
     assert status_response.status_code == 200
-    assert status_response.json()["status"] == "queued"
+    assert status_response.json()["status"] in {"queued", "in_progress", "completed"}
 
     db = session_factory()
     try:
@@ -154,6 +153,26 @@ def test_pre_analysis_requires_owner_consents(client_and_session) -> None:
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "PRE_ANALYSIS_BLOCKED"
     assert response.json()["error"]["details"]["blockedReason"] == "missing_consent"
+
+
+def test_pre_analysis_accepts_empty_post_body(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_document_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+    _create_extraction_rows(session_factory, UUID(case_id))
+
+    response = client.post(
+        f"/api/v1/cases/{case_id}/pre-analysis",
+        headers=headers,
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    fetched = client.get(f"/api/v1/cases/{case_id}/pre-analysis", headers=headers)
+    assert fetched.status_code == 200
+    assert fetched.json()["status"] == "completed"
 
 
 def test_pre_analysis_blocks_foreign_user_access(client_and_session) -> None:
