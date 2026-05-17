@@ -97,6 +97,18 @@ class Settings(BaseSettings):
     AI_PRE_ANALYSIS_TIMEOUT_MS: int = 60000
     PRE_ANALYSIS_JOB_MAX_ATTEMPTS: int = 3
 
+    EPAYCO_PUBLIC_KEY: str = ""
+    EPAYCO_PRIVATE_KEY: str = ""
+    EPAYCO_P_CUST_ID_CLIENTE: str = ""
+    EPAYCO_P_KEY: str = ""
+    EPAYCO_API_BASE_URL: str = "https://apify.epayco.co"
+    EPAYCO_CHECKOUT_VERSION: str = "2"
+    EPAYCO_CHECKOUT_TYPE: str = "onpage"
+    EPAYCO_TEST_MODE: bool = True
+    EPAYCO_COMMERCE_NAME: str = "Labora"
+    EPAYCO_CHECKOUT_TIMEOUT_MS: int = 15000
+    EPAYCO_CONFIRMATION_URL: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -409,6 +421,53 @@ class Settings(BaseSettings):
     @property
     def pre_analysis_job_max_attempts(self) -> int:
         return max(self.PRE_ANALYSIS_JOB_MAX_ATTEMPTS, 1)
+
+    @property
+    def epayco_public_key(self) -> str:
+        return self.EPAYCO_PUBLIC_KEY
+
+    @property
+    def epayco_private_key(self) -> str:
+        return self.EPAYCO_PRIVATE_KEY
+
+    @property
+    def epayco_p_cust_id_cliente(self) -> str:
+        return self.EPAYCO_P_CUST_ID_CLIENTE
+
+    @property
+    def epayco_p_key(self) -> str:
+        return self.EPAYCO_P_KEY
+
+    @property
+    def epayco_api_base_url(self) -> str:
+        return self.EPAYCO_API_BASE_URL.rstrip("/")
+
+    @property
+    def epayco_checkout_version(self) -> str:
+        return self.EPAYCO_CHECKOUT_VERSION or "2"
+
+    @property
+    def epayco_checkout_type(self) -> str:
+        checkout_type = (self.EPAYCO_CHECKOUT_TYPE or "onpage").strip().lower()
+        return checkout_type if checkout_type in {"onpage", "standard"} else "onpage"
+
+    @property
+    def epayco_test_mode(self) -> bool:
+        return self.EPAYCO_TEST_MODE
+
+    @property
+    def epayco_commerce_name(self) -> str:
+        return self.EPAYCO_COMMERCE_NAME or self.APP_NAME
+
+    @property
+    def epayco_checkout_timeout_seconds(self) -> float:
+        return max(self.EPAYCO_CHECKOUT_TIMEOUT_MS, 1) / 1000
+
+    @property
+    def epayco_confirmation_url(self) -> str:
+        if self.EPAYCO_CONFIRMATION_URL:
+            return self.EPAYCO_CONFIRMATION_URL.rstrip("/")
+        return f"{self.backend_public_url}{self.API_V1_PREFIX}/payments/epayco/confirmation"
 
 
 @lru_cache

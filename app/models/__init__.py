@@ -48,6 +48,7 @@ from app.models.lead import Lead
 from app.models.oauth_state import OAuthState
 from app.models.otp_code import OTPCode
 from app.models.password_reset_token import PasswordResetToken
+from app.models.paywall import ConversionEvent, LockedFeature, Paywall, PreviewResult
 from app.models.public_content import PublicContent
 from app.models.public_event import PublicEvent
 from app.models.pre_analysis import (
@@ -89,6 +90,7 @@ __all__ = [
     "ConsentIdempotencyKey",
     "ContributionGap",
     "ContributionWeek",
+    "ConversionEvent",
     "AiConfidence",
     "Document",
     "DocumentHash",
@@ -112,16 +114,19 @@ __all__ = [
     "LaborNovelty",
     "LaborPeriod",
     "LaboraCase",
+    "LockedFeature",
     "MissingDocument",
     "OAuthState",
     "OcrJob",
     "OcrPageResult",
     "OTPCode",
     "PasswordResetToken",
+    "Paywall",
     "PreAnalysis",
     "PreAnalysisJob",
     "PreIssue",
     "PreViability",
+    "PreviewResult",
     "PublicContent",
     "PublicEvent",
     "Question",
