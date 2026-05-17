@@ -17,6 +17,7 @@ from app.models.audit_event import AuditEvent
 from app.models.case import CaseOwner, CaseStatusHistory, LaboraCase
 from app.models.consent import LegalDocument, UserConsent
 from app.models.paywall import ConversionEvent, LockedFeature, Paywall, PreviewResult
+from app.models.payment import Order, Payment, PaymentTransaction, Receipt, UnlockEvent
 from app.models.pre_analysis import PreAnalysis, PreIssue
 from app.models.user import User
 from app.services.consent_service import REQUIRED_CONSENT_TYPES, calculate_document_hash
@@ -375,6 +376,113 @@ def test_epayco_confirmation_unlocks_paywall_with_valid_signature(
         assert paywall.unlock_required is False
         assert paywall.unlocked_at is not None
         assert {"checkout_returned", "unlock_completed"} <= event_names
+    finally:
+        db.close()
+
+
+def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    order_response = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={
+            "productCode": "FULL_ANALYSIS_UNLOCK",
+            "returnUrl": f"https://labora.centralspike.com/casos/{case_id}/pago/retorno",
+            "cancelUrl": f"https://labora.centralspike.com/casos/{case_id}/pago/cancelado",
+        },
+        headers=headers,
+    )
+    assert order_response.status_code == 201
+    order = order_response.json()["order"]
+    assert order["status"] == "created"
+    assert order["totalAmount"] == 150000
+
+    repeated_order = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        headers=headers,
+    )
+    assert repeated_order.status_code == 201
+    assert repeated_order.json()["order"]["id"] == order["id"]
+
+    checkout = client.post(
+        "/api/v1/payments/checkout",
+        json={
+            "orderId": order["id"],
+            "paymentMethod": "CARD",
+            "customer": {
+                "fullName": "Maria Gomez",
+                "email": "maria@example.com",
+                "documentType": "CC",
+                "documentNumber": "52123456",
+                "phone": "3001112233",
+            },
+        },
+        headers=headers,
+    )
+    assert checkout.status_code == 201
+    payment = checkout.json()["payment"]
+    assert payment["status"] == "pending"
+    assert payment["checkoutUrl"].startswith("http://localhost:3000/app/cases/")
+
+    db = session_factory()
+    try:
+        stored_order = db.get(Order, UUID(order["id"]))
+        stored_pending_payment = db.get(Payment, UUID(payment["id"]))
+        invoice = epayco_invoice_for_paywall(stored_order.paywall_id)
+        assert stored_pending_payment.raw_provider_payload["checkoutPayload"]["confirmation"].endswith(
+            "/api/v1/payments/webhook/epayco"
+        )
+    finally:
+        db.close()
+
+    webhook_payload = {
+        "x_ref_payco": "ref-payment-module-001",
+        "x_transaction_id": "tx-payment-module-001",
+        "x_amount": "150000.00",
+        "x_currency_code": "COP",
+        "x_id_invoice": invoice,
+        "x_cod_response": "1",
+        "x_response": "Aceptada",
+    }
+    webhook = client.post("/api/v1/payments/webhook/epayco", json=webhook_payload)
+    assert webhook.status_code == 200
+    assert webhook.json()["received"] is True
+    assert webhook.json()["duplicate"] is False
+
+    duplicate = client.post("/api/v1/payments/webhook/epayco", json=webhook_payload)
+    assert duplicate.status_code == 200
+    assert duplicate.json()["duplicate"] is True
+
+    status_response = client.get(f"/api/v1/payments/{payment['id']}", headers=headers)
+    assert status_response.status_code == 200
+    status_data = status_response.json()
+    assert status_data["payment"]["status"] == "approved"
+    assert status_data["case"]["paymentStatus"] == "full_analysis_unlocked"
+    assert status_data["case"]["unlockStatus"] == "full_analysis_unlocked"
+    assert status_data["receipt"]["available"] is True
+
+    receipt = client.get(f"/api/v1/orders/{order['id']}/receipt", headers=headers)
+    assert receipt.status_code == 200
+    assert receipt.json()["receipt"]["totalAmount"] == 150000
+
+    db = session_factory()
+    try:
+        case = db.get(LaboraCase, UUID(case_id))
+        stored_payment = db.get(Payment, UUID(payment["id"]))
+        assert case.status == "full_analysis_unlocked"
+        assert db.get(Order, UUID(order["id"])).status == "paid"
+        assert stored_payment.status == "approved"
+        assert db.query(PaymentTransaction).count() == 1
+        assert db.query(UnlockEvent).count() == 1
+        assert db.query(Receipt).count() == 1
+        audit_names = {event.event_type for event in db.query(AuditEvent).all()}
+        assert "pago_desbloqueo.approved" in audit_names
+        assert "pago_desbloqueo.unlocked" in audit_names
     finally:
         db.close()
 

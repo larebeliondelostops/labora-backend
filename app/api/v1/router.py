@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     extraction,
     health,
     paywall,
+    payments,
     pre_analysis,
     public,
     questionnaires,
@@ -86,6 +87,10 @@ api_router.include_router(
     paywall.admin_router,
     prefix="/admin",
     tags=["admin-paywall"],
+)
+api_router.include_router(
+    payments.router,
+    tags=["payments"],
 )
 api_router.include_router(
     questionnaires.router,

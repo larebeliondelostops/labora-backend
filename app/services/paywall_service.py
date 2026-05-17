@@ -34,7 +34,12 @@ ADMIN_ROLES = {"admin", "legal_admin"}
 LEGAL_REVIEWER_ROLES = {"legal_reviewer"}
 PREVIEW_ADMIN_ROLES = {*ADMIN_ROLES, *LEGAL_REVIEWER_ROLES, "legal_ops", "reviewer"}
 LOCKED_CASE_STATUSES = {"closed", "archived", "blocked"}
-UNLOCKED_CASE_STATUSES = {"paid_unlocked", "analysis_in_progress", "completed"}
+UNLOCKED_CASE_STATUSES = {
+    "paid_unlocked",
+    "full_analysis_unlocked",
+    "analysis_in_progress",
+    "completed",
+}
 READY_PREANALYSIS_STATUSES = {"completed", "requires_review"}
 LOW_CONFIDENCE_THRESHOLD = Decimal("0.7000")
 PROMPT_VERSION = "paywall-preview-v1"

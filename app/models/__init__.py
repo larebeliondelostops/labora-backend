@@ -49,6 +49,13 @@ from app.models.oauth_state import OAuthState
 from app.models.otp_code import OTPCode
 from app.models.password_reset_token import PasswordResetToken
 from app.models.paywall import ConversionEvent, LockedFeature, Paywall, PreviewResult
+from app.models.payment import (
+    Order,
+    Payment,
+    PaymentTransaction,
+    Receipt,
+    UnlockEvent,
+)
 from app.models.public_content import PublicContent
 from app.models.public_event import PublicEvent
 from app.models.pre_analysis import (
@@ -120,8 +127,11 @@ __all__ = [
     "OcrJob",
     "OcrPageResult",
     "OTPCode",
+    "Order",
     "PasswordResetToken",
     "Paywall",
+    "Payment",
+    "PaymentTransaction",
     "PreAnalysis",
     "PreAnalysisJob",
     "PreIssue",
@@ -133,10 +143,12 @@ __all__ = [
     "QuestionnaireAnswer",
     "QuestionnaireTemplate",
     "QuestionOption",
+    "Receipt",
     "SalaryBase",
     "Session",
     "User",
     "UserConsent",
     "UserCorrection",
+    "UnlockEvent",
     "VisitorIntent",
 ]

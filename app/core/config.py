@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     EPAYCO_CHECKOUT_TIMEOUT_MS: int = 15000
     EPAYCO_CONFIRMATION_URL: str = ""
 
+    PAYMENT_PROVIDER: str = "epayco"
+    PAYMENT_PROVIDER_WEBHOOK_SECRET: str = ""
+    PAYMENT_ORDER_EXPIRATION_MINUTES: int = 60
+    PAYMENT_CURRENCY: str = "COP"
+    FULL_ANALYSIS_UNLOCK_PRICE_COP: int = 150000
+    PAYMENT_WEBHOOK_RATE_LIMIT_PER_MINUTE: int = 60
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -468,6 +475,30 @@ class Settings(BaseSettings):
         if self.EPAYCO_CONFIRMATION_URL:
             return self.EPAYCO_CONFIRMATION_URL.rstrip("/")
         return f"{self.backend_public_url}{self.API_V1_PREFIX}/payments/epayco/confirmation"
+
+    @property
+    def payment_provider(self) -> str:
+        return (self.PAYMENT_PROVIDER or "epayco").strip().lower()
+
+    @property
+    def payment_provider_webhook_secret(self) -> str:
+        return self.PAYMENT_PROVIDER_WEBHOOK_SECRET
+
+    @property
+    def payment_order_expiration_minutes(self) -> int:
+        return max(self.PAYMENT_ORDER_EXPIRATION_MINUTES, 1)
+
+    @property
+    def payment_currency(self) -> str:
+        return (self.PAYMENT_CURRENCY or "COP").strip().upper()
+
+    @property
+    def full_analysis_unlock_price_cop(self) -> int:
+        return max(self.FULL_ANALYSIS_UNLOCK_PRICE_COP, 0)
+
+    @property
+    def payment_webhook_rate_limit_per_minute(self) -> int:
+        return max(self.PAYMENT_WEBHOOK_RATE_LIMIT_PER_MINUTE, 1)
 
 
 @lru_cache

@@ -32,6 +32,7 @@ INTERNAL_ROLES = {"system", *ADMIN_ROLES}
 LOCKED_STATUSES = {"closed", "archived"}
 PAID_OR_LATER_STATUSES = {
     "paid_unlocked",
+    "full_analysis_unlocked",
     "analysis_in_progress",
     "completed",
 }
@@ -44,6 +45,15 @@ CASE_STATUSES = {
     "preanalysis_pending",
     "preanalysis_ready",
     "preview_locked",
+    "payment_not_started",
+    "payment_order_created",
+    "payment_pending",
+    "payment_approved",
+    "payment_rejected",
+    "payment_failed",
+    "payment_expired",
+    "payment_requires_review",
+    "full_analysis_unlocked",
     "paid_unlocked",
     "analysis_in_progress",
     "completed",
@@ -106,7 +116,107 @@ CASE_STATUS_TRANSITIONS = {
         "error",
     },
     "preview_locked": {
+        "payment_order_created",
+        "payment_pending",
+        "payment_rejected",
+        "payment_failed",
+        "payment_expired",
         "paid_unlocked",
+        "full_analysis_unlocked",
+        "requires_review",
+        "blocked",
+        "closed",
+        "archived",
+        "error",
+    },
+    "payment_not_started": {
+        "payment_order_created",
+        "payment_pending",
+        "preview_locked",
+        "requires_review",
+        "blocked",
+        "closed",
+        "archived",
+        "error",
+    },
+    "payment_order_created": {
+        "payment_pending",
+        "payment_expired",
+        "payment_rejected",
+        "payment_failed",
+        "payment_requires_review",
+        "requires_review",
+        "blocked",
+        "closed",
+        "archived",
+        "error",
+    },
+    "payment_pending": {
+        "payment_approved",
+        "payment_rejected",
+        "payment_failed",
+        "payment_expired",
+        "payment_requires_review",
+        "requires_review",
+        "blocked",
+        "closed",
+        "archived",
+        "error",
+    },
+    "payment_approved": {
+        "full_analysis_unlocked",
+        "paid_unlocked",
+        "analysis_in_progress",
+        "requires_review",
+        "blocked",
+        "closed",
+        "archived",
+        "error",
+    },
+    "payment_rejected": {
+        "payment_order_created",
+        "payment_pending",
+        "payment_failed",
+        "payment_expired",
+        "requires_review",
+        "blocked",
+        "closed",
+        "archived",
+        "error",
+    },
+    "payment_failed": {
+        "payment_order_created",
+        "payment_pending",
+        "payment_expired",
+        "requires_review",
+        "blocked",
+        "closed",
+        "archived",
+        "error",
+    },
+    "payment_expired": {
+        "payment_order_created",
+        "payment_pending",
+        "requires_review",
+        "blocked",
+        "closed",
+        "archived",
+        "error",
+    },
+    "payment_requires_review": {
+        "payment_order_created",
+        "payment_pending",
+        "payment_rejected",
+        "payment_failed",
+        "requires_review",
+        "blocked",
+        "closed",
+        "archived",
+        "error",
+    },
+    "full_analysis_unlocked": {
+        "analysis_in_progress",
+        "completed",
         "requires_review",
         "blocked",
         "closed",
@@ -138,6 +248,15 @@ CASE_STATUS_TRANSITIONS = {
         "preanalysis_pending",
         "preanalysis_ready",
         "preview_locked",
+        "payment_not_started",
+        "payment_order_created",
+        "payment_pending",
+        "payment_approved",
+        "payment_rejected",
+        "payment_failed",
+        "payment_expired",
+        "payment_requires_review",
+        "full_analysis_unlocked",
         "paid_unlocked",
         "analysis_in_progress",
         "completed",
@@ -1384,6 +1503,15 @@ def step_for_status(status_value: str) -> tuple[str, str]:
         "preanalysis_pending": ("preanalysis_pending", "start_preanalysis"),
         "preanalysis_ready": ("preanalysis_ready", "view_preanalysis"),
         "preview_locked": ("preview_locked", "unlock_full_analysis"),
+        "payment_not_started": ("preview_locked", "unlock_full_analysis"),
+        "payment_order_created": ("payment_order_created", "start_payment_checkout"),
+        "payment_pending": ("payment_pending", "wait_payment_confirmation"),
+        "payment_approved": ("payment_approved", "unlock_full_analysis"),
+        "payment_rejected": ("payment_rejected", "retry_payment"),
+        "payment_failed": ("payment_failed", "retry_payment"),
+        "payment_expired": ("payment_expired", "retry_payment"),
+        "payment_requires_review": ("payment_requires_review", "contact_support"),
+        "full_analysis_unlocked": ("analysis_unlocked", "start_full_analysis"),
         "paid_unlocked": ("analysis_unlocked", "start_full_analysis"),
         "analysis_in_progress": ("analysis_in_progress", "wait_analysis"),
         "completed": ("completed", "view_report"),
@@ -1415,6 +1543,16 @@ def allowed_actions_for_status(status_value: str) -> list[str]:
         actions.extend(["view_documents", "view_preanalysis", "close_case"])
     elif status_value == "preview_locked":
         actions.extend(["view_preanalysis", "unlock_full_analysis", "close_case"])
+    elif status_value in {"payment_not_started", "payment_order_created"}:
+        actions.extend(["view_preanalysis", "unlock_full_analysis", "close_case"])
+    elif status_value == "payment_pending":
+        actions.extend(["view_preanalysis", "view_payment_status", "close_case"])
+    elif status_value in {"payment_rejected", "payment_failed", "payment_expired"}:
+        actions.extend(["view_preanalysis", "retry_payment", "close_case"])
+    elif status_value == "payment_requires_review":
+        actions.extend(["view_preanalysis", "request_professional_review", "close_case"])
+    elif status_value in {"payment_approved", "full_analysis_unlocked"}:
+        actions.extend(["view_preanalysis", "start_full_analysis", "close_case"])
     elif status_value == "paid_unlocked":
         actions.extend(["view_preanalysis", "close_case"])
     elif status_value == "analysis_in_progress":
@@ -1433,7 +1571,7 @@ def _severity_for_status(status_value: str) -> str:
         return "error"
     if status_value in {"blocked", "requires_review", "closed"}:
         return "warning"
-    if status_value in {"completed", "paid_unlocked", "documents_uploaded"}:
+    if status_value in {"completed", "paid_unlocked", "full_analysis_unlocked", "payment_approved", "documents_uploaded"}:
         return "success"
     return "info"
 

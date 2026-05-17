@@ -43,6 +43,7 @@ class EpaycoCheckoutClient:
         preview: PreviewResult,
         paywall: Paywall,
         return_url: str | None,
+        confirmation_url: str | None = None,
     ) -> EpaycoCheckoutSession:
         invoice = epayco_invoice_for_paywall(paywall.id)
         response_url = return_url or f"{settings.frontend_url}/app/cases/{case.id}/preview?payment=return"
@@ -54,6 +55,7 @@ class EpaycoCheckoutClient:
             paywall=paywall,
             invoice=invoice,
             response_url=response_url,
+            confirmation_url=confirmation_url or settings.epayco_confirmation_url,
         )
         if not self.is_configured():
             return EpaycoCheckoutSession(
@@ -161,6 +163,7 @@ class EpaycoCheckoutClient:
         paywall: Paywall,
         invoice: str,
         response_url: str,
+        confirmation_url: str,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "checkout_version": settings.epayco_checkout_version,
@@ -172,7 +175,7 @@ class EpaycoCheckoutClient:
             "country": "CO",
             "invoice": invoice,
             "response": response_url,
-            "confirmation": settings.epayco_confirmation_url,
+            "confirmation": confirmation_url,
             "method": "POST",
             "uniqueTransactionPerBill": True,
             "extras": {
