@@ -6,6 +6,15 @@ from app.models.case import (
     CaseTag,
     LaboraCase,
 )
+from app.models.case_result import (
+    CaseResult,
+    EconomicEstimate,
+    FinalViability,
+    RecommendedRoute,
+    ResultAuditEvent,
+    ResultCard,
+    ResultInconsistency,
+)
 from app.models.consent import (
     ConsentEvidence,
     ConsentIdempotencyKey,
@@ -96,6 +105,7 @@ __all__ = [
     "AnswerVersion",
     "CaseHistoryEvent",
     "CaseOwner",
+    "CaseResult",
     "CaseProfile",
     "CaseSignal",
     "CaseQuestionnaireSession",
@@ -126,6 +136,8 @@ __all__ = [
     "ExternalAuthAccount",
     "FaqItem",
     "FileUpload",
+    "EconomicEstimate",
+    "FinalViability",
     "CalculationResult",
     "ConfidenceScore",
     "FullAnalysis",
@@ -159,6 +171,10 @@ __all__ = [
     "QuestionnaireTemplate",
     "QuestionOption",
     "Receipt",
+    "RecommendedRoute",
+    "ResultAuditEvent",
+    "ResultCard",
+    "ResultInconsistency",
     "SalaryBase",
     "Scenario",
     "Session",

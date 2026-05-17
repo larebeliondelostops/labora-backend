@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     analysis,
     auth,
+    case_results,
     cases,
     consents,
     document_precheck,
@@ -88,6 +89,10 @@ api_router.include_router(
     full_analysis.admin_router,
     prefix="/admin",
     tags=["admin-full-analysis"],
+)
+api_router.include_router(
+    case_results.router,
+    tags=["case-results"],
 )
 api_router.include_router(
     paywall.router,
