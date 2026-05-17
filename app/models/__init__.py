@@ -44,6 +44,15 @@ from app.models.extraction import (
 )
 from app.models.external_auth_account import ExternalAuthAccount
 from app.models.faq_item import FaqItem
+from app.models.full_analysis import (
+    AnalysisInconsistency,
+    CalculationResult,
+    ConfidenceScore,
+    FullAnalysis,
+    FullAnalysisJob,
+    LegalRuleResult,
+    Scenario,
+)
 from app.models.lead import Lead
 from app.models.oauth_state import OAuthState
 from app.models.otp_code import OTPCode
@@ -99,6 +108,7 @@ __all__ = [
     "ContributionWeek",
     "ConversionEvent",
     "AiConfidence",
+    "AnalysisInconsistency",
     "Document",
     "DocumentHash",
     "DocumentIssue",
@@ -116,8 +126,13 @@ __all__ = [
     "ExternalAuthAccount",
     "FaqItem",
     "FileUpload",
+    "CalculationResult",
+    "ConfidenceScore",
+    "FullAnalysis",
+    "FullAnalysisJob",
     "Lead",
     "LegalDocument",
+    "LegalRuleResult",
     "LaborNovelty",
     "LaborPeriod",
     "LaboraCase",
@@ -145,6 +160,7 @@ __all__ = [
     "QuestionOption",
     "Receipt",
     "SalaryBase",
+    "Scenario",
     "Session",
     "User",
     "UserConsent",
