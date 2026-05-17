@@ -73,6 +73,30 @@ CTA_COPY = {
     },
 }
 
+REVIEW_GUIDANCE_ACTIONS = [
+    {
+        "code": "upload_clear_labor_history",
+        "label": "Sube una historia laboral completa y legible",
+        "description": "Incluye todas las paginas disponibles y evita fotos borrosas, recortes o archivos incompletos.",
+    },
+    {
+        "code": "complete_key_case_facts",
+        "label": "Completa los datos clave del caso",
+        "description": (
+            "Confirma si hubo semanas faltantes, varios empleadores, sector publico, docencia, "
+            "regimen especial o reclamacion previa."
+        ),
+    },
+    {
+        "code": "upload_supporting_documents",
+        "label": "Agrega soportes que respalden la diferencia",
+        "description": (
+            "Sirven resoluciones, respuestas del fondo, certificaciones laborales, colillas, "
+            "planillas o soportes de salario/base de cotizacion."
+        ),
+    },
+]
+
 PRE_ANALYSIS_EVENTS = {
     "created": "analisis_preliminar_gratuito.created",
     "queued": "analisis_preliminar_gratuito.queued",
@@ -989,7 +1013,10 @@ class PreAnalysisService:
             warnings.append(
                 {
                     "code": "LOW_CONFIDENCE_REVIEW",
-                    "message": "El resultado requiere revision por baja confianza.",
+                    "message": (
+                        "El resultado requiere revision por baja confianza. Para mejorarla, "
+                        "completa los datos clave y sube soportes claros del caso."
+                    ),
                 }
             )
         return {
@@ -1014,6 +1041,7 @@ class PreAnalysisService:
             ],
             "cta": self._cta(pre_analysis.cta_type),
             "warnings": warnings,
+            "reviewGuidance": self._review_guidance(pre_analysis),
             "createdAt": pre_analysis.created_at,
             "completedAt": pre_analysis.completed_at,
         }
@@ -1059,6 +1087,37 @@ class PreAnalysisService:
             return None
         copy = CTA_COPY.get(cta_type, CTA_COPY["unlock_full_analysis"])
         return {"type": cta_type, **copy}
+
+    def _review_guidance(self, pre_analysis: PreAnalysis) -> dict[str, Any] | None:
+        low_confidence = (
+            pre_analysis.confidence is not None
+            and Decimal(pre_analysis.confidence) < LOW_CONFIDENCE_THRESHOLD
+        )
+        if pre_analysis.status != "requires_review" and not low_confidence:
+            return None
+
+        reason_code = "low_confidence" if low_confidence else "human_review"
+        if reason_code == "low_confidence":
+            title = "Necesitamos un poco mas de informacion"
+            message = (
+                "Tu preanalisis no tiene suficientes senales confiables todavia. "
+                "Para mejorarlo, agrega documentos claros y completa los datos que permitan "
+                "confirmar periodos, empleadores, salarios o situaciones especiales."
+            )
+        else:
+            title = "Tu preanalisis necesita revision adicional"
+            message = (
+                "Un operador debe revisar el resultado antes de continuarlo. Si quieres ayudar a "
+                "cerrar la revision, puedes agregar mas soportes y completar los datos clave del caso."
+            )
+
+        return {
+            "reasonCode": reason_code,
+            "title": title,
+            "message": message,
+            "confidenceThreshold": float(LOW_CONFIDENCE_THRESHOLD),
+            "actions": REVIEW_GUIDANCE_ACTIONS,
+        }
 
     def _admin_item(self, item: PreAnalysis) -> dict[str, Any]:
         return {

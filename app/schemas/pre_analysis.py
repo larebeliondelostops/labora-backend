@@ -94,6 +94,22 @@ class WarningDto(BaseModel):
     message: str
 
 
+class ReviewGuidanceActionDto(BaseModel):
+    code: str
+    label: str
+    description: str
+
+
+class ReviewGuidanceDto(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    reason_code: str = Field(alias="reasonCode")
+    title: str
+    message: str
+    confidence_threshold: float = Field(alias="confidenceThreshold")
+    actions: list[ReviewGuidanceActionDto] = Field(default_factory=list)
+
+
 class PreAnalysisResultResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -115,6 +131,7 @@ class PreAnalysisResultResponse(BaseModel):
     )
     cta: CtaDto | None = None
     warnings: list[WarningDto] = Field(default_factory=list)
+    review_guidance: ReviewGuidanceDto | None = Field(alias="reviewGuidance", default=None)
     created_at: datetime | None = Field(alias="createdAt", default=None)
     completed_at: datetime | None = Field(alias="completedAt", default=None)
 

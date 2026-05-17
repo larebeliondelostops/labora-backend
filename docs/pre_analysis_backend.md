@@ -12,6 +12,7 @@ Modulo backend para generar y consultar el preanalisis gratuito de un expediente
 
 - `GET /api/v1/cases/{caseId}/pre-analysis`
   - Devuelve el resultado visible para el usuario: semaforo, viabilidad, resumen limitado, issues publicos, documentos faltantes, CTA y warnings.
+  - Si el resultado queda en `requires_review`, incluye `reviewGuidance` con una razon y acciones concretas para mejorar la confianza del preanalisis.
   - Nunca devuelve campos de calculo completo, valores finales, fundamentos extensos ni estrategia legal.
 
 - `GET /api/v1/cases/{caseId}/pre-analysis/status`

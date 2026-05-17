@@ -261,6 +261,13 @@ def test_low_confidence_pre_analysis_requires_review(client_and_session, monkeyp
     assert fetched.json()["status"] == "requires_review"
     assert fetched.json()["trafficLight"] == "gray"
     assert fetched.json()["cta"]["type"] == "wait_review"
+    assert fetched.json()["reviewGuidance"]["reasonCode"] == "low_confidence"
+    assert fetched.json()["reviewGuidance"]["confidenceThreshold"] == 0.7
+    assert {item["code"] for item in fetched.json()["reviewGuidance"]["actions"]} >= {
+        "upload_clear_labor_history",
+        "complete_key_case_facts",
+        "upload_supporting_documents",
+    }
     assert {warning["code"] for warning in fetched.json()["warnings"]} >= {
         "PRELIMINARY_ONLY",
         "LOW_CONFIDENCE_REVIEW",
