@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.orm import Session
@@ -28,11 +29,26 @@ from app.schemas.case import (
     InternalCaseStatusUpdateRequest,
     InternalCaseStatusUpdateResponse,
 )
+from app.repositories.delivery_repository import DeliveryRepository
+from app.schemas.delivery import (
+    CloseCaseRequest as DeliveryCloseCaseRequest,
+    CloseCaseResponse as DeliveryCloseCaseResponse,
+)
 from app.services.case_service import CaseService
+from app.services.delivery_service import CaseClosureService
 
 router = APIRouter()
 admin_router = APIRouter()
 internal_router = APIRouter()
+
+DELIVERY_CLOSE_REASONS = {
+    "user_completed_download",
+    "user_no_longer_needs_service",
+    "case_finished",
+    "duplicate_case",
+    "admin_decision",
+    "other",
+}
 
 
 @router.post("", response_model=CaseCreateResponse, status_code=status.HTTP_201_CREATED)
@@ -136,7 +152,7 @@ def get_case_history(
     )
 
 
-@router.post("/{case_id}/close", response_model=CaseCloseResponse)
+@router.post("/{case_id}/close", response_model=CaseCloseResponse | DeliveryCloseCaseResponse)
 def close_case(
     case_id: str,
     payload: CaseCloseRequest,
@@ -145,6 +161,18 @@ def close_case(
     db: Session = Depends(get_db),
 ) -> dict:
     user, _token_payload = context
+    if _has_delivery_package(db, case_id):
+        reason = payload.reason if payload.reason in DELIVERY_CLOSE_REASONS else "other"
+        notes = payload.notes
+        if reason == "other" and not notes and payload.reason != "other":
+            notes = payload.reason
+        return CaseClosureService(db).close_case(
+            case_id,
+            DeliveryCloseCaseRequest(reason=reason, notes=notes),
+            user=user,
+            ip_address=get_client_ip(request),
+            user_agent=get_user_agent(request),
+        )
     return CaseService(db).close_case(
         case_id,
         payload,
@@ -152,6 +180,14 @@ def close_case(
         ip_address=get_client_ip(request),
         user_agent=get_user_agent(request),
     )
+
+
+def _has_delivery_package(db: Session, case_id: str) -> bool:
+    try:
+        parsed_case_id = UUID(str(case_id))
+    except ValueError:
+        return False
+    return DeliveryRepository(db).latest_package_for_case(parsed_case_id) is not None
 
 
 @internal_router.post("/{case_id}/status", response_model=InternalCaseStatusUpdateResponse)

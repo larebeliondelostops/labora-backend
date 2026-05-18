@@ -119,6 +119,14 @@ class Settings(BaseSettings):
     FULL_ANALYSIS_UNLOCK_PRICE_COP: int = 150000
     PAYMENT_WEBHOOK_RATE_LIMIT_PER_MINUTE: int = 60
 
+    DELIVERY_SHARE_BASE_URL: str = "https://labora.centralspike.com/share/delivery"
+    DELIVERY_SHARE_MAX_DAYS: int = 30
+    DELIVERY_SIGNED_URL_TTL_SECONDS: int = 300
+    DELIVERY_MAX_SHARE_VIEWS_DEFAULT: int = 20
+    DELIVERY_AI_SUMMARY_ENABLED: bool = True
+    DELIVERY_DOWNLOAD_RATE_LIMIT: int = 60
+    DELIVERY_PUBLIC_SHARE_RATE_LIMIT: int = 30
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -512,6 +520,34 @@ class Settings(BaseSettings):
     @property
     def payment_webhook_rate_limit_per_minute(self) -> int:
         return max(self.PAYMENT_WEBHOOK_RATE_LIMIT_PER_MINUTE, 1)
+
+    @property
+    def delivery_share_base_url(self) -> str:
+        return self.DELIVERY_SHARE_BASE_URL.rstrip("/")
+
+    @property
+    def delivery_share_max_days(self) -> int:
+        return max(self.DELIVERY_SHARE_MAX_DAYS, 1)
+
+    @property
+    def delivery_signed_url_ttl_seconds(self) -> int:
+        return min(max(self.DELIVERY_SIGNED_URL_TTL_SECONDS, 60), 300)
+
+    @property
+    def delivery_max_share_views_default(self) -> int:
+        return max(self.DELIVERY_MAX_SHARE_VIEWS_DEFAULT, 1)
+
+    @property
+    def delivery_ai_summary_enabled(self) -> bool:
+        return self.DELIVERY_AI_SUMMARY_ENABLED
+
+    @property
+    def delivery_download_rate_limit(self) -> int:
+        return max(self.DELIVERY_DOWNLOAD_RATE_LIMIT, 1)
+
+    @property
+    def delivery_public_share_rate_limit(self) -> int:
+        return max(self.DELIVERY_PUBLIC_SHARE_RATE_LIMIT, 1)
 
 
 @lru_cache

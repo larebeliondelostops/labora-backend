@@ -225,7 +225,10 @@ class CaseUpdateRequest(BaseModel):
 
 
 class CaseCloseRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     reason: str = Field(min_length=3, max_length=500)
+    notes: str | None = Field(default=None, max_length=2000)
 
 
 class InternalCaseStatusUpdateRequest(BaseModel):

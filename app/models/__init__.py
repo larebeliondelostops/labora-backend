@@ -21,6 +21,13 @@ from app.models.consent import (
     LegalDocument,
     UserConsent,
 )
+from app.models.delivery import (
+    CaseClosure,
+    DeliveryEvent,
+    DeliveryPackage,
+    DownloadFile,
+    ShareLink,
+)
 from app.models.document import (
     Document,
     DocumentHash,
@@ -132,6 +139,7 @@ __all__ = [
     "AnswerVersion",
     "CaseHistoryEvent",
     "CaseOwner",
+    "CaseClosure",
     "CaseResult",
     "CaseProfile",
     "CaseSignal",
@@ -148,6 +156,8 @@ __all__ = [
     "AnalysisInconsistency",
     "AiGenerationRun",
     "Document",
+    "DeliveryEvent",
+    "DeliveryPackage",
     "DocumentHash",
     "DocumentIssue",
     "DocumentPage",
@@ -157,6 +167,7 @@ __all__ = [
     "DraftQualityCheck",
     "DraftSection",
     "DraftVersion",
+    "DownloadFile",
     "DocumentType",
     "DocumentValidation",
     "Employer",
@@ -226,6 +237,7 @@ __all__ = [
     "SalaryBase",
     "Scenario",
     "Session",
+    "ShareLink",
     "User",
     "UserConsent",
     "UserCorrection",

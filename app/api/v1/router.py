@@ -6,6 +6,7 @@ from app.api.v1.endpoints import (
     case_results,
     cases,
     consents,
+    delivery,
     document_precheck,
     documents,
     extraction,
@@ -113,6 +114,10 @@ api_router.include_router(
 api_router.include_router(
     professional_reviews.router,
     tags=["professional-reviews"],
+)
+api_router.include_router(
+    delivery.router,
+    tags=["delivery"],
 )
 api_router.include_router(
     paywall.router,
