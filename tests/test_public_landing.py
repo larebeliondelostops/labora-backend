@@ -7,9 +7,7 @@ from app.schemas.public import (
     FaqResponse,
     LeadCreateResponse,
     NextAction,
-    PublicContentSection,
     PublicEventResponse,
-    PublicHomeResponse,
 )
 from app.services.lead_service import LeadService
 from app.services.public_content_service import PublicContentService
@@ -19,33 +17,21 @@ from app.repositories.visitor_intent_repository import VisitorIntentRepository
 client = TestClient(app)
 
 
-def test_get_public_home(monkeypatch) -> None:
-    def fake_get_home(self):
-        return PublicHomeResponse(
-            page="home",
-            sections=[
-                PublicContentSection(
-                    section_key="hero",
-                    title="Revision de historia laboral",
-                    subtitle="Orientacion inicial antes del analisis completo.",
-                    cta_label="Iniciar analisis",
-                    cta_url="/registro",
-                )
-            ],
-            legal_notice="Labora usa IA asistida.",
-            updated_at="2026-05-11T00:00:00",
-        )
-
-    monkeypatch.setattr(PublicContentService, "get_home", fake_get_home)
-
+def test_get_public_home_is_deprecated_empty_payload() -> None:
     response = client.get("/api/v1/public/home")
 
     assert response.status_code == 200
     data = response.json()
     assert data["page"] == "home"
-    assert data["sections"][0]["sectionKey"] == "hero"
-    assert data["sections"][0]["ctaUrl"] == "/registro"
-    assert data["legalNotice"] == "Labora usa IA asistida."
+    assert data["sections"] == []
+    assert data["legalNotice"] is None
+    assert data["updatedAt"]
+
+
+def test_public_home_is_marked_deprecated_in_openapi() -> None:
+    schema = app.openapi()
+
+    assert schema["paths"]["/api/v1/public/home"]["get"]["deprecated"] is True
 
 
 def test_get_public_faqs(monkeypatch) -> None:

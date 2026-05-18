@@ -88,7 +88,7 @@ class PublicHomeResponse(BaseModel):
 
     page: str
     sections: list[PublicContentSection]
-    legal_notice: str = Field(alias="legalNotice")
+    legal_notice: str | None = Field(alias="legalNotice")
     updated_at: datetime = Field(alias="updatedAt")
 
 

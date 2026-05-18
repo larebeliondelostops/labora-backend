@@ -35,7 +35,7 @@ def _user_agent(request: Request) -> str | None:
     return request.headers.get("user-agent")
 
 
-@router.get("/home", response_model=PublicHomeResponse)
+@router.get("/home", response_model=PublicHomeResponse, deprecated=True)
 def get_home(db: Session = Depends(get_db)) -> PublicHomeResponse:
     return PublicContentService(db).get_home()
 
