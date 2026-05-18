@@ -11,6 +11,7 @@ from app.api.v1.endpoints import (
     extraction,
     full_analysis,
     health,
+    legal_actions,
     paywall,
     payments,
     pre_analysis,
@@ -98,6 +99,15 @@ api_router.include_router(
 api_router.include_router(
     reports.router,
     tags=["reports"],
+)
+api_router.include_router(
+    legal_actions.router,
+    tags=["legal-actions"],
+)
+api_router.include_router(
+    legal_actions.admin_router,
+    prefix="/admin",
+    tags=["admin-legal-actions"],
 )
 api_router.include_router(
     paywall.router,

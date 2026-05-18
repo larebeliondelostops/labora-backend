@@ -63,6 +63,18 @@ from app.models.full_analysis import (
     Scenario,
 )
 from app.models.lead import Lead
+from app.models.legal_action import (
+    AiGenerationRun,
+    DraftComment,
+    DraftExport,
+    DraftQualityCheck,
+    DraftSection,
+    DraftVersion,
+    LegalAction,
+    LegalActionJob,
+    LegalDraft,
+    LegalTemplate,
+)
 from app.models.oauth_state import OAuthState
 from app.models.otp_code import OTPCode
 from app.models.password_reset_token import PasswordResetToken
@@ -127,11 +139,17 @@ __all__ = [
     "ConversionEvent",
     "AiConfidence",
     "AnalysisInconsistency",
+    "AiGenerationRun",
     "Document",
     "DocumentHash",
     "DocumentIssue",
     "DocumentPage",
     "DocumentPrecheck",
+    "DraftComment",
+    "DraftExport",
+    "DraftQualityCheck",
+    "DraftSection",
+    "DraftVersion",
     "DocumentType",
     "DocumentValidation",
     "Employer",
@@ -152,8 +170,12 @@ __all__ = [
     "FullAnalysis",
     "FullAnalysisJob",
     "Lead",
+    "LegalAction",
+    "LegalActionJob",
     "LegalDocument",
+    "LegalDraft",
     "LegalRuleResult",
+    "LegalTemplate",
     "LaborNovelty",
     "LaborPeriod",
     "LaboraCase",

@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     AI_API_KEY: str = ""
     AI_BASE_URL: str = ""
     AI_MODEL: str = ""
+    AI_MODEL_DRAFT_GENERATION: str = ""
+    AI_MODEL_QUALITY_CHECK: str = ""
+    AI_TIMEOUT_SECONDS: int = 0
     AI_TIMEOUT_MS: int = 30000
     AI_MAX_RETRIES: int = 2
     AI_TEMPERATURE: float = 0
@@ -346,7 +349,17 @@ class Settings(BaseSettings):
         return self.AI_MODEL
 
     @property
+    def ai_model_draft_generation(self) -> str:
+        return self.AI_MODEL_DRAFT_GENERATION or self.AI_MODEL
+
+    @property
+    def ai_model_quality_check(self) -> str:
+        return self.AI_MODEL_QUALITY_CHECK or self.AI_MODEL
+
+    @property
     def ai_timeout_seconds(self) -> float:
+        if self.AI_TIMEOUT_SECONDS:
+            return max(self.AI_TIMEOUT_SECONDS, 1)
         return max(self.AI_TIMEOUT_MS, 1) / 1000
 
     @property
