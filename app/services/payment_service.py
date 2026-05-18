@@ -737,6 +737,20 @@ class PaymentService:
         order.paid_at = order.paid_at or now
         order.updated_at = now
 
+        if order.product_code == "PROFESSIONAL_REVIEW":
+            self._approve_professional_review_payment(
+                case=case,
+                order=order,
+                payment=payment,
+                transaction=transaction,
+                provider_event=provider_event,
+                previous_order=previous_order,
+                previous_payment=previous_payment,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            return
+
         previous_case_status = case.status
         self._set_case_status(
             case,
@@ -805,6 +819,60 @@ class PaymentService:
             payment=payment,
             new_state={"caseStatus": case.status, "unlockEventId": str(unlock_event.id)},
             metadata={"eventName": "case.full_analysis_unlocked"},
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+
+    def _approve_professional_review_payment(
+        self,
+        *,
+        case: LaboraCase,
+        order: Order,
+        payment: Payment,
+        transaction: PaymentTransaction,
+        provider_event: ProviderPaymentEvent,
+        previous_order: dict[str, Any],
+        previous_payment: dict[str, Any],
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> None:
+        from app.services.professional_review_service import ProfessionalReviewService
+
+        now = utc_now()
+        ProfessionalReviewService(self.db).confirm_payment_order(order.id, commit=False)
+        receipt = self._ensure_receipt(order=order, payment=payment)
+        transaction.payment_id = payment.id
+        transaction.order_id = order.id
+        transaction.processed = True
+        transaction.processed_at = now
+        self._record_internal_event(
+            event_name="payment.approved",
+            case_id=case.id,
+            user_id=order.user_id,
+            metadata={
+                "orderId": str(order.id),
+                "paymentId": str(payment.id),
+                "provider": payment.provider,
+                "amount": payment.amount,
+                "currency": payment.currency,
+                "productCode": order.product_code,
+            },
+        )
+        self._record_internal_event(
+            event_name="payment.receipt_issued",
+            case_id=case.id,
+            user_id=order.user_id,
+            metadata={"orderId": str(order.id), "paymentId": str(payment.id), "receiptId": str(receipt.id)},
+        )
+        self._audit(
+            "pago_desbloqueo.approved",
+            actor=None,
+            case=case,
+            order=order,
+            payment=payment,
+            previous_state={"order": previous_order, "payment": previous_payment},
+            new_state={"order": self._order_state(order), "payment": self._payment_state(payment)},
+            metadata={"providerEventId": provider_event.provider_event_id, "productCode": order.product_code},
             ip_address=ip_address,
             user_agent=user_agent,
         )

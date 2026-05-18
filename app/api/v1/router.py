@@ -15,6 +15,7 @@ from app.api.v1.endpoints import (
     paywall,
     payments,
     pre_analysis,
+    professional_reviews,
     public,
     questionnaires,
     reports,
@@ -108,6 +109,10 @@ api_router.include_router(
     legal_actions.admin_router,
     prefix="/admin",
     tags=["admin-legal-actions"],
+)
+api_router.include_router(
+    professional_reviews.router,
+    tags=["professional-reviews"],
 )
 api_router.include_router(
     paywall.router,

@@ -88,6 +88,13 @@ from app.models.payment import (
 )
 from app.models.public_content import PublicContent
 from app.models.public_event import PublicEvent
+from app.models.professional_review import (
+    LawyerComment,
+    ProfessionalReview,
+    ReviewedFile,
+    ReviewerAssignment,
+    ReviewOrder,
+)
 from app.models.pre_analysis import (
     CaseSignal,
     MissingDocument,
@@ -179,6 +186,7 @@ __all__ = [
     "LaborNovelty",
     "LaborPeriod",
     "LaboraCase",
+    "LawyerComment",
     "LockedFeature",
     "MissingDocument",
     "OAuthState",
@@ -194,6 +202,7 @@ __all__ = [
     "PreAnalysisJob",
     "PreIssue",
     "PreViability",
+    "ProfessionalReview",
     "PreviewResult",
     "PublicContent",
     "PublicEvent",
@@ -211,6 +220,9 @@ __all__ = [
     "ResultAuditEvent",
     "ResultCard",
     "ResultInconsistency",
+    "ReviewedFile",
+    "ReviewerAssignment",
+    "ReviewOrder",
     "SalaryBase",
     "Scenario",
     "Session",
