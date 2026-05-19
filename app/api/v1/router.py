@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    admin,
     analysis,
     auth,
     case_results,
@@ -46,6 +47,11 @@ api_router.include_router(
     tags=["cases"],
 )
 api_router.include_router(
+    admin.router,
+    prefix="/admin",
+    tags=["admin-backoffice"],
+)
+api_router.include_router(
     cases.internal_router,
     prefix="/internal/cases",
     tags=["internal-cases"],
@@ -54,6 +60,7 @@ api_router.include_router(
     cases.admin_router,
     prefix="/admin/cases",
     tags=["admin-cases"],
+    include_in_schema=False,
 )
 api_router.include_router(
     documents.router,

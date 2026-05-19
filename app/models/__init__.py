@@ -1,4 +1,15 @@
 from app.models.audit_event import AuditEvent
+from app.models.admin import (
+    AdminAuditEvent,
+    AdminReviewDecision,
+    AdminReviewTask,
+    AdminRolePermission,
+    AdminUser,
+    AiConfidenceAlert,
+    Assignment,
+    CaseQueueItem,
+    InternalNote,
+)
 from app.models.case import (
     CaseHistoryEvent,
     CaseOwner,
@@ -135,11 +146,19 @@ from app.models.visitor_intent import VisitorIntent
 
 __all__ = [
     "AuditEvent",
+    "AdminAuditEvent",
+    "AdminReviewDecision",
+    "AdminReviewTask",
+    "AdminRolePermission",
+    "AdminUser",
     "AiQuestionnaireEvent",
+    "AiConfidenceAlert",
     "AnswerVersion",
+    "Assignment",
     "CaseHistoryEvent",
     "CaseOwner",
     "CaseClosure",
+    "CaseQueueItem",
     "CaseResult",
     "CaseProfile",
     "CaseSignal",
@@ -187,6 +206,7 @@ __all__ = [
     "ConfidenceScore",
     "FullAnalysis",
     "FullAnalysisJob",
+    "InternalNote",
     "Lead",
     "LegalAction",
     "LegalActionJob",

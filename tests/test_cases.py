@@ -12,6 +12,17 @@ from app.core.database import Base, get_db
 from app.core.security import create_access_token
 from app.main import app
 from app.models.audit_event import AuditEvent
+from app.models.admin import (
+    AdminAuditEvent,
+    AdminReviewDecision,
+    AdminReviewTask,
+    AdminRolePermission,
+    AdminUser,
+    AiConfidenceAlert,
+    Assignment,
+    CaseQueueItem,
+    InternalNote,
+)
 from app.models.case import (
     CaseHistoryEvent,
     CaseOwner,
@@ -45,6 +56,15 @@ TABLES = [
     CaseStatusHistory.__table__,
     CaseHistoryEvent.__table__,
     CaseTag.__table__,
+    AdminUser.__table__,
+    AdminRolePermission.__table__,
+    CaseQueueItem.__table__,
+    Assignment.__table__,
+    InternalNote.__table__,
+    AdminAuditEvent.__table__,
+    AdminReviewTask.__table__,
+    AdminReviewDecision.__table__,
+    AiConfidenceAlert.__table__,
 ]
 
 TITLES = {
@@ -68,7 +88,7 @@ def client_and_session():
         autoflush=False,
         bind=engine,
     )
-    Base.metadata.create_all(engine, tables=TABLES)
+    Base.metadata.create_all(engine)
 
     def override_get_db():
         db = TestingSessionLocal()
@@ -81,7 +101,7 @@ def client_and_session():
     with TestClient(app) as client:
         yield client, TestingSessionLocal
     app.dependency_overrides.clear()
-    Base.metadata.drop_all(engine, tables=list(reversed(TABLES)))
+    Base.metadata.drop_all(engine)
 
 
 def test_create_list_detail_submit_and_history(client_and_session) -> None:
@@ -220,8 +240,9 @@ def test_admin_can_filter_view_assign_and_tag_cases(client_and_session) -> None:
     db = session_factory()
     try:
         audit_types = {event.event_type for event in db.query(AuditEvent).all()}
-        assert "expediente.admin_viewed" in audit_types
-        assert "expediente.assigned" in audit_types
+        admin_audit_types = {event.event_type for event in db.query(AdminAuditEvent).all()}
+        assert "backoffice_admin.viewed" in admin_audit_types
+        assert "admin.case.assigned" in admin_audit_types
         assert "expediente.tag_added" in audit_types
         assert (
             db.query(CaseOwner)
