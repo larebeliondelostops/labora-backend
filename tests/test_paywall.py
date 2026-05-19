@@ -487,6 +487,123 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
         db.close()
 
 
+def test_payment_flow_exposes_complete_order_contract(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    created_order = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        headers=headers,
+    )
+    assert created_order.status_code == 201
+    order = created_order.json()["order"]
+
+    flow_response = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
+    assert flow_response.status_code == 200
+    flow_order = flow_response.json()["paymentFlow"]["order"]
+
+    assert flow_order["id"] == order["id"]
+    assert flow_order["subtotalAmount"] == order["subtotalAmount"] == 150000
+    assert flow_order["taxAmount"] == order["taxAmount"] == 0
+    assert flow_order["discountAmount"] == order["discountAmount"] == 0
+    assert flow_order["totalAmount"] == order["totalAmount"] == 150000
+    assert flow_order["currency"] == order["currency"] == "COP"
+    assert flow_order["productCode"] == order["productCode"] == "FULL_ANALYSIS_UNLOCK"
+
+
+def test_checkout_realigns_paywall_amount_and_never_sends_zero(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    order_response = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        headers=headers,
+    )
+    assert order_response.status_code == 201
+    order = order_response.json()["order"]
+    assert order["totalAmount"] == 150000
+
+    db = session_factory()
+    try:
+        stored_order = db.get(Order, UUID(order["id"]))
+        paywall = db.get(Paywall, stored_order.paywall_id)
+        paywall.price_amount = Decimal("0")
+        paywall.price_currency = ""
+        paywall.price_label = None
+        db.commit()
+    finally:
+        db.close()
+
+    checkout = client.post(
+        "/api/v1/payments/checkout",
+        json={
+            "orderId": order["id"],
+            "paymentMethod": "CARD",
+            "customer": {
+                "fullName": "Maria Gomez",
+                "email": "maria@example.com",
+                "documentType": "CC",
+                "documentNumber": "52123456",
+                "phone": "3001112233",
+            },
+        },
+        headers=headers,
+    )
+    assert checkout.status_code == 201
+    payment_id = checkout.json()["payment"]["id"]
+
+    db = session_factory()
+    try:
+        stored_payment = db.get(Payment, UUID(payment_id))
+        checkout_payload = stored_payment.raw_provider_payload["checkoutPayload"]
+        stored_order = db.get(Order, UUID(order["id"]))
+        paywall = db.get(Paywall, stored_order.paywall_id)
+        assert checkout_payload["amount"] == 150000.0
+        assert checkout_payload["currency"] == "COP"
+        assert stored_payment.amount == 150000
+        assert int(paywall.price_amount) == 150000
+        assert paywall.price_currency == "COP"
+    finally:
+        db.close()
+
+
+def test_paywall_checkout_fails_fast_when_price_is_zero(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    created = client.post(f"/api/v1/cases/{case_id}/preview", headers=headers)
+    assert created.status_code == 200
+
+    db = session_factory()
+    try:
+        paywall = db.query(Paywall).one()
+        paywall.price_amount = Decimal("0")
+        paywall.price_currency = "COP"
+        db.commit()
+    finally:
+        db.close()
+
+    checkout = client.post(
+        f"/api/v1/cases/{case_id}/checkout/session",
+        json={"source": "preview_paywall"},
+        headers=headers,
+    )
+    assert checkout.status_code == 503
+    assert checkout.json()["error"]["code"] == "CHECKOUT_UNAVAILABLE"
+    assert checkout.json()["error"]["details"]["reason"] == "EPAYCO_INVALID_AMOUNT"
+
+
 def test_order_is_recreated_when_active_amount_is_zero(client_and_session) -> None:
     client, session_factory = client_and_session
     user_id, headers = _create_user(session_factory)

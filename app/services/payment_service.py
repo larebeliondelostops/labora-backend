@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -29,6 +30,9 @@ from app.services.epayco_service import (
     paywall_id_from_epayco_invoice,
 )
 from app.utils.dates import utc_now
+
+
+logger = logging.getLogger(__name__)
 
 
 ADMIN_ROLES = {"admin", "legal_admin"}
@@ -124,8 +128,24 @@ class PaymentService:
             ip_address=ip_address,
             user_agent=user_agent,
         )
+        trace_id = self._trace_id("order")
         price_amount = self._unlock_price()
         price_currency = self._currency()
+        self._log_trace(
+            event_name="payment.order.before_create",
+            trace_id=trace_id,
+            case_id=case.id,
+            order_id=None,
+            payment_id=None,
+            payload={
+                "productCode": product_code,
+                "subtotalAmount": price_amount,
+                "taxAmount": 0,
+                "discountAmount": 0,
+                "totalAmount": price_amount,
+                "currency": price_currency,
+            },
+        )
 
         existing_order = self.payments.active_order_for_case(
             case_id=case.id,
@@ -176,6 +196,22 @@ class PaymentService:
             },
             created_at=now,
             updated_at=now,
+        )
+        self._log_trace(
+            event_name="payment.order.after_persist",
+            trace_id=trace_id,
+            case_id=case.id,
+            order_id=order.id,
+            payment_id=None,
+            payload={
+                "status": order.status,
+                "subtotalAmount": order.subtotal_amount,
+                "taxAmount": order.tax_amount,
+                "discountAmount": order.discount_amount,
+                "totalAmount": order.total_amount,
+                "currency": order.currency,
+                "productCode": order.product_code,
+            },
         )
         self._set_case_status(
             case,
@@ -230,8 +266,30 @@ class PaymentService:
                 return {"payment": self._payment_payload(existing_payment)}
 
         paywall = self._paywall_for_order(order)
+        self._ensure_paywall_pricing(paywall)
+        paywall_price = self._coerce_price_amount(paywall.price_amount)
+        if paywall_price != order.total_amount:
+            paywall.price_amount = Decimal(str(order.total_amount))
+            paywall.price_currency = order.currency
+            paywall.price_label = _format_price_label(order.total_amount, order.currency)
+            paywall.updated_at = utc_now()
         preview = self._preview_for_paywall(paywall)
         checkout_return_url = return_url or (order.metadata_json or {}).get("returnUrl")
+        trace_id = self._trace_id("checkout")
+        self._log_trace(
+            event_name="payment.checkout.before_provider_call",
+            trace_id=trace_id,
+            case_id=case.id,
+            order_id=order.id,
+            payment_id=None,
+            payload={
+                "provider": "epayco",
+                "orderTotalAmount": order.total_amount,
+                "orderCurrency": order.currency,
+                "paywallPriceAmount": self._coerce_price_amount(paywall.price_amount),
+                "paywallPriceCurrency": (paywall.price_currency or "").strip().upper() or None,
+            },
+        )
         try:
             checkout_session = EpaycoCheckoutClient().create_session(
                 case=case,
@@ -240,9 +298,34 @@ class PaymentService:
                 return_url=checkout_return_url,
                 confirmation_url=self._provider_webhook_url("epayco"),
             )
+            self._log_trace(
+                event_name="payment.checkout.after_provider_response",
+                trace_id=trace_id,
+                case_id=case.id,
+                order_id=order.id,
+                payment_id=None,
+                payload={
+                    "provider": "epayco",
+                    "providerSessionId": checkout_session.session_id,
+                    "providerCheckoutUrl": checkout_session.checkout_url,
+                    "providerPayloadAmount": checkout_session.provider_payload.get("amount"),
+                    "providerPayloadCurrency": checkout_session.provider_payload.get("currency"),
+                },
+            )
         except EpaycoProviderError as exc:
             order.status = "failed"
             order.updated_at = utc_now()
+            self._log_trace(
+                event_name="payment.checkout.after_provider_response",
+                trace_id=trace_id,
+                case_id=case.id,
+                order_id=order.id,
+                payment_id=None,
+                payload={
+                    "provider": "epayco",
+                    "errorCode": exc.code,
+                },
+            )
             self._audit(
                 "pago_desbloqueo.failed",
                 actor=user,
@@ -1500,12 +1583,7 @@ class PaymentService:
     def _payment_flow_order(self, order: Order | None) -> dict[str, Any] | None:
         if order is None:
             return None
-        return {
-            "id": str(order.id),
-            "status": order.status,
-            "totalAmount": order.total_amount,
-            "currency": order.currency,
-        }
+        return self._order_payload(order)
 
     def _payment_flow_payment(self, payment: Payment | None) -> dict[str, Any] | None:
         if payment is None:
@@ -1662,6 +1740,43 @@ class PaymentService:
             "documentNumber": case.holder_document_number,
             "phone": case.holder_phone,
         }
+
+    def _trace_id(self, prefix: str) -> str:
+        return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+    def _coerce_price_amount(self, value: Decimal | int | str | None) -> int:
+        if value is None:
+            return 0
+        try:
+            return int(Decimal(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return 0
+
+    def _log_trace(
+        self,
+        *,
+        event_name: str,
+        trace_id: str,
+        case_id: uuid.UUID | None,
+        order_id: uuid.UUID | None,
+        payment_id: uuid.UUID | None,
+        payload: dict[str, Any],
+    ) -> None:
+        logger.info(
+            "payment_trace %s",
+            json.dumps(
+                {
+                    "event": event_name,
+                    "traceId": trace_id,
+                    "caseId": str(case_id) if case_id else None,
+                    "orderId": str(order_id) if order_id else None,
+                    "paymentId": str(payment_id) if payment_id else None,
+                    "payload": _json_safe(payload),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
 
 
 def _normalize_status(provider_status: str | None, response_code: str | None) -> str:

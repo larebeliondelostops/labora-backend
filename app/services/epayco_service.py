@@ -3,7 +3,7 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import requests
@@ -165,11 +165,12 @@ class EpaycoCheckoutClient:
         response_url: str,
         confirmation_url: str,
     ) -> dict[str, Any]:
+        amount = _checkout_amount(paywall.price_amount)
         payload: dict[str, Any] = {
             "checkout_version": settings.epayco_checkout_version,
             "name": settings.epayco_commerce_name,
             "currency": paywall.price_currency or "COP",
-            "amount": float(paywall.price_amount or Decimal("0")),
+            "amount": amount,
             "description": "Analisis completo de historia laboral Labora",
             "lang": "ES",
             "country": "CO",
@@ -189,6 +190,27 @@ class EpaycoCheckoutClient:
         if billing:
             payload["billing"] = billing
         return payload
+
+
+def _checkout_amount(value: Decimal | None) -> float:
+    if value is None:
+        raise EpaycoProviderError(
+            "El monto del checkout no fue configurado.",
+            code="EPAYCO_INVALID_AMOUNT",
+        )
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise EpaycoProviderError(
+            "El monto del checkout no es valido.",
+            code="EPAYCO_INVALID_AMOUNT",
+        ) from exc
+    if amount <= 0:
+        raise EpaycoProviderError(
+            "El monto del checkout debe ser mayor a cero.",
+            code="EPAYCO_INVALID_AMOUNT",
+        )
+    return float(amount)
 
 
 def epayco_invoice_for_paywall(paywall_id: uuid.UUID) -> str:
