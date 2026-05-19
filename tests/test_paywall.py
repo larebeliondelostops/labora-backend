@@ -487,6 +487,54 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
         db.close()
 
 
+def test_order_is_recreated_when_active_amount_is_zero(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    first = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        headers=headers,
+    )
+    assert first.status_code == 201
+    first_order = first.json()["order"]
+    assert first_order["totalAmount"] == 150000
+
+    db = session_factory()
+    try:
+        stored_order = db.get(Order, UUID(first_order["id"]))
+        stored_order.subtotal_amount = 0
+        stored_order.total_amount = 0
+        paywall = db.get(Paywall, stored_order.paywall_id)
+        paywall.price_amount = Decimal("0")
+        paywall.price_currency = ""
+        paywall.price_label = None
+        db.commit()
+    finally:
+        db.close()
+
+    recreated = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        headers=headers,
+    )
+    assert recreated.status_code == 201
+    recreated_order = recreated.json()["order"]
+    assert recreated_order["id"] != first_order["id"]
+    assert recreated_order["totalAmount"] == 150000
+    assert recreated_order["subtotalAmount"] == 150000
+
+    db = session_factory()
+    try:
+        stale_order = db.get(Order, UUID(first_order["id"]))
+        assert stale_order.status == "expired"
+    finally:
+        db.close()
+
+
 def _create_user(session_factory, *, role: str = "user"):
     db = session_factory()
     try:

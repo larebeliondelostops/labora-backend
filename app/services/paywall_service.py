@@ -45,9 +45,9 @@ LOW_CONFIDENCE_THRESHOLD = Decimal("0.7000")
 PROMPT_VERSION = "paywall-preview-v1"
 DEFAULT_AI_MODEL = "rules-paywall-preview-v1"
 PAYMENT_PRODUCT_CODE = "ANALISIS_COMPLETO_HISTORIA_LABORAL"
-PRICE_AMOUNT = Decimal("150000.00")
-PRICE_CURRENCY = "COP"
-PRICE_LABEL = "$150.000 COP"
+PRICE_AMOUNT = Decimal(str(max(settings.full_analysis_unlock_price_cop, 0)))
+PRICE_CURRENCY = (settings.payment_currency or "COP").strip().upper()
+PRICE_LABEL = f"${int(PRICE_AMOUNT):,} {PRICE_CURRENCY}".replace(",", ".")
 
 PAYWALL_EVENTS = {
     "created": "vista_previa_resultado_paywall.created",

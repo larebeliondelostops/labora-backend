@@ -124,12 +124,19 @@ class PaymentService:
             ip_address=ip_address,
             user_agent=user_agent,
         )
+        price_amount = self._unlock_price()
+        price_currency = self._currency()
 
         existing_order = self.payments.active_order_for_case(
             case_id=case.id,
             product_code=PRODUCT_CODE,
         )
-        if existing_order is not None and not self._is_expired(existing_order):
+        if (
+            existing_order is not None
+            and not self._is_expired(existing_order)
+            and existing_order.total_amount == price_amount
+            and existing_order.currency == price_currency
+        ):
             self._audit(
                 "pago_desbloqueo.viewed",
                 actor=user,
@@ -152,11 +159,11 @@ class PaymentService:
             user_id=case.owner_user_id,
             paywall_id=paywall.id,
             status="created",
-            currency=self._currency(),
-            subtotal_amount=self._unlock_price(),
+            currency=price_currency,
+            subtotal_amount=price_amount,
             tax_amount=0,
             discount_amount=0,
-            total_amount=self._unlock_price(),
+            total_amount=price_amount,
             product_code=PRODUCT_CODE,
             product_name=PRODUCT_NAME,
             description=PRODUCT_DESCRIPTION,
@@ -1034,6 +1041,7 @@ class PaymentService:
                 message="El expediente requiere revision interna antes de pagar.",
                 details={"caseId": str(case.id), "previewId": str(preview.id)},
             )
+        self._ensure_paywall_pricing(paywall)
         return preview, paywall
 
     def _provider_event(
@@ -1384,10 +1392,35 @@ class PaymentService:
         return order.expires_at is not None and _as_utc(order.expires_at) <= utc_now()
 
     def _currency(self) -> str:
-        return settings.payment_currency or "COP"
+        return (settings.payment_currency or "COP").strip().upper()
 
     def _unlock_price(self) -> int:
         return max(settings.full_analysis_unlock_price_cop, 0)
+
+    def _ensure_paywall_pricing(self, paywall: Paywall) -> None:
+        expected_price = self._unlock_price()
+        expected_currency = self._currency()
+        updated = False
+
+        current_price = 0
+        if paywall.price_amount is not None:
+            try:
+                current_price = int(Decimal(paywall.price_amount))
+            except (InvalidOperation, TypeError, ValueError):
+                current_price = 0
+        if current_price != expected_price:
+            paywall.price_amount = Decimal(str(expected_price))
+            updated = True
+        current_currency = (paywall.price_currency or "").strip().upper()
+        if current_currency != expected_currency:
+            paywall.price_currency = expected_currency
+            updated = True
+        expected_label = _format_price_label(expected_price, expected_currency)
+        if paywall.price_label != expected_label:
+            paywall.price_label = _format_price_label(expected_price, expected_currency)
+            updated = True
+        if updated:
+            paywall.updated_at = utc_now()
 
     def _provider_webhook_url(self, provider: str) -> str:
         return f"{settings.backend_public_url}{settings.API_V1_PREFIX}/payments/webhook/{provider}"
@@ -1653,6 +1686,12 @@ def _normalize_status(provider_status: str | None, response_code: str | None) ->
     if normalized in {"chargeback", "contracargo"}:
         return "chargeback"
     return "unknown"
+
+
+def _format_price_label(amount: int, currency: str) -> str:
+    normalized_amount = max(int(amount), 0)
+    normalized_currency = (currency or "COP").strip().upper()
+    return f"${normalized_amount:,} {normalized_currency}".replace(",", ".")
 
 
 def _normalize_text(value: str | None) -> str:
