@@ -2,9 +2,15 @@ from datetime import datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.core.api_errors import ApiError
+from app.core.database import Base, get_db
 from app.core.rate_limit import public_rate_limiter
 from app.core.security import (
     create_access_token,
@@ -14,12 +20,64 @@ from app.core.security import (
     verify_otp_code,
 )
 from app.main import app
+from app.models.audit_event import AuditEvent
+from app.models.otp_code import OTPCode
+from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import UserRegisterRequest
 from app.schemas.user import UserProfileUpdate
 from app.services.account_auth_service import AccountAuthService
+from app.services.email_service import EmailService
 
 client = TestClient(app)
+
+
+AUTH_TABLES = [User.__table__, OTPCode.__table__, AuditEvent.__table__]
+
+
+@pytest.fixture()
+def auth_client_and_session():
+    public_rate_limiter.clear()
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=engine,
+    )
+    Base.metadata.create_all(engine, tables=AUTH_TABLES)
+
+    def override_get_db():
+        db = TestingSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        yield client, TestingSessionLocal
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        Base.metadata.drop_all(engine, tables=list(reversed(AUTH_TABLES)))
+
+
+def _register_payload(
+    *,
+    email: str = "ana@example.com",
+    document_number: str = "1020304050",
+) -> dict:
+    return {
+        "firstName": "Ana",
+        "lastName": "Gomez",
+        "documentType": "CC",
+        "documentNumber": document_number,
+        "email": email,
+        "password": "Password123*",
+    }
 
 
 def test_password_strength_validation() -> None:
@@ -186,6 +244,162 @@ def test_register_endpoint_contract(monkeypatch) -> None:
     assert response.status_code == 201
     assert response.json()["data"]["nextStep"] == "verify_otp"
     assert response.json()["data"]["user"]["documentNumberMasked"] == "******4050"
+
+
+def test_register_new_user_creates_otp(auth_client_and_session, monkeypatch) -> None:
+    client, session_factory = auth_client_and_session
+    sent_otps = []
+
+    def fake_send_otp(self, *, recipient, code, purpose):
+        sent_otps.append(
+            {
+                "recipient": recipient,
+                "code": code,
+                "purpose": purpose,
+            }
+        )
+
+    monkeypatch.setattr(EmailService, "send_otp", fake_send_otp)
+
+    response = client.post(
+        "/api/v1/auth/register",
+        json=_register_payload(
+            email="ANA@EXAMPLE.COM",
+            document_number="1.020.304.050",
+        ),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["nextStep"] == "verify_otp"
+    assert len(sent_otps) == 1
+    assert sent_otps[0]["recipient"] == "ana@example.com"
+    assert sent_otps[0]["purpose"] == "register"
+    assert len(sent_otps[0]["code"]) == 6
+
+    with session_factory() as db:
+        user = db.query(User).filter(User.email == "ana@example.com").one()
+        assert user.document_number == "1020304050"
+        assert db.query(OTPCode).count() == 1
+
+
+def test_register_duplicate_email_blocks_user_and_otp(
+    auth_client_and_session,
+    monkeypatch,
+) -> None:
+    client, session_factory = auth_client_and_session
+    sent_otps = []
+    monkeypatch.setattr(
+        EmailService,
+        "send_otp",
+        lambda self, **kwargs: sent_otps.append(kwargs),
+    )
+
+    first = client.post("/api/v1/auth/register", json=_register_payload())
+    duplicate = client.post(
+        "/api/v1/auth/register",
+        json=_register_payload(
+            email=" ANA@EXAMPLE.COM ",
+            document_number="999888777",
+        ),
+    )
+
+    assert first.status_code == 201
+    assert duplicate.status_code == 409
+    error = duplicate.json()["error"]
+    assert error["code"] == "EMAIL_ALREADY_EXISTS"
+    assert error["details"][0]["field"] == "email"
+    assert error["details"][0]["nextStep"] == "login"
+    assert error["details"][0]["redirectTo"] == "/auth/login"
+
+    with session_factory() as db:
+        assert db.query(User).count() == 1
+        assert db.query(OTPCode).count() == 1
+    assert len(sent_otps) == 1
+
+
+def test_register_duplicate_document_blocks_user_and_otp(
+    auth_client_and_session,
+    monkeypatch,
+) -> None:
+    client, session_factory = auth_client_and_session
+    sent_otps = []
+    monkeypatch.setattr(
+        EmailService,
+        "send_otp",
+        lambda self, **kwargs: sent_otps.append(kwargs),
+    )
+
+    first = client.post("/api/v1/auth/register", json=_register_payload())
+    duplicate = client.post(
+        "/api/v1/auth/register",
+        json=_register_payload(
+            email="otra@example.com",
+            document_number="1.020.304.050",
+        ),
+    )
+
+    assert first.status_code == 201
+    assert duplicate.status_code == 409
+    error = duplicate.json()["error"]
+    assert error["code"] == "DOCUMENT_ALREADY_EXISTS"
+    assert error["details"][0]["field"] == "documentNumber"
+    assert error["details"][0]["nextStep"] == "login"
+    assert error["details"][0]["redirectTo"] == "/auth/login"
+
+    with session_factory() as db:
+        assert db.query(User).count() == 1
+        assert db.query(OTPCode).count() == 1
+    assert len(sent_otps) == 1
+
+
+@pytest.mark.parametrize(
+    ("constraint_name", "expected_code"),
+    [
+        ("ix_users_email", "EMAIL_ALREADY_EXISTS"),
+        ("uq_users_document", "DOCUMENT_ALREADY_EXISTS"),
+    ],
+)
+def test_register_maps_unique_race_to_conflict(
+    constraint_name,
+    expected_code,
+) -> None:
+    class FakeUsers:
+        def get_by_email(self, email):
+            return None
+
+        def get_by_document(self, document_type, document_number):
+            return None
+
+        def create_from_registration(self, payload):
+            orig = SimpleNamespace(
+                diag=SimpleNamespace(constraint_name=constraint_name)
+            )
+            raise IntegrityError("insert users", {}, orig)
+
+    class FakeDb:
+        def __init__(self):
+            self.rollbacks = 0
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    db = FakeDb()
+    service = AccountAuthService(db)
+    service.users = FakeUsers()
+
+    try:
+        service.register(
+            UserRegisterRequest.model_validate(_register_payload()),
+            ip_address=None,
+            user_agent=None,
+        )
+    except ApiError as exc:
+        assert exc.status_code == 409
+        assert exc.code == expected_code
+        assert exc.details[0]["nextStep"] == "login"
+        assert db.rollbacks == 1
+    else:
+        raise AssertionError("Unique constraint violations should map to API conflicts")
 
 
 def test_register_duplicate_email_error(monkeypatch) -> None:

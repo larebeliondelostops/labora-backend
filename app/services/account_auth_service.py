@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
 from app.core.api_errors import ApiError
@@ -44,36 +45,31 @@ class AccountAuthService:
         ip_address: str | None,
         user_agent: str | None,
     ) -> dict[str, Any]:
-        if self.users.get_by_email(str(payload.email)):
-            raise ApiError(
-                status_code=status.HTTP_409_CONFLICT,
-                code="EMAIL_ALREADY_EXISTS",
-                message="El correo ya esta registrado. Inicia sesion para continuar.",
-                details=[
-                    {
-                        "field": "email",
-                        "message": "Ya existe una cuenta asociada a este correo.",
-                        "nextStep": "login",
-                        "redirectTo": "/auth/login",
-                    }
-                ],
-            )
-        if self.users.get_by_document(payload.document_type, payload.document_number):
-            raise ApiError(
-                status_code=status.HTTP_409_CONFLICT,
-                code="DOCUMENT_ALREADY_EXISTS",
-                message="El documento ya esta registrado. Inicia sesion para continuar.",
-                details=[
-                    {
-                        "field": "documentNumber",
-                        "message": "Ya existe una cuenta asociada a este documento.",
-                        "nextStep": "login",
-                        "redirectTo": "/auth/login",
-                    }
-                ],
-            )
+        email = _normalize_email(str(payload.email))
+        document_type = _normalize_document_type(payload.document_type)
+        document_number = _normalize_document_number(payload.document_number)
+        payload = payload.model_copy(
+            update={
+                "email": email,
+                "document_type": document_type,
+                "document_number": document_number,
+            }
+        )
 
-        user = self.users.create_from_registration(payload)
+        if self.users.get_by_email(email):
+            raise _email_already_exists_error()
+        if self.users.get_by_document(document_type, document_number):
+            raise _document_already_exists_error()
+
+        try:
+            user = self.users.create_from_registration(payload)
+        except IntegrityError as exc:
+            self.db.rollback()
+            conflict_error = _registration_conflict_error_from_integrity_error(exc)
+            if conflict_error is not None:
+                raise conflict_error from exc
+            raise
+
         otp_code = self._issue_otp(
             user=user,
             recipient=user.email,
@@ -667,6 +663,79 @@ def _mask_document(document_number: str | None) -> str | None:
         return None
     suffix = document_number[-4:]
     return f"{'*' * max(len(document_number) - 4, 0)}{suffix}"
+
+
+def _normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def _normalize_document_type(document_type: str) -> str:
+    return document_type.strip().upper()
+
+
+def _normalize_document_number(document_number: str) -> str:
+    return "".join(
+        character for character in document_number.strip() if character.isalnum()
+    ).upper()
+
+
+def _email_already_exists_error() -> ApiError:
+    return ApiError(
+        status_code=status.HTTP_409_CONFLICT,
+        code="EMAIL_ALREADY_EXISTS",
+        message="Este correo ya esta registrado. Inicia sesion para continuar.",
+        details=[
+            {
+                "field": "email",
+                "message": "Este correo ya esta registrado.",
+                "nextStep": "login",
+                "redirectTo": "/auth/login",
+            }
+        ],
+    )
+
+
+def _document_already_exists_error() -> ApiError:
+    return ApiError(
+        status_code=status.HTTP_409_CONFLICT,
+        code="DOCUMENT_ALREADY_EXISTS",
+        message="Este documento ya esta registrado. Inicia sesion para continuar.",
+        details=[
+            {
+                "field": "documentNumber",
+                "message": "Este documento ya esta registrado.",
+                "nextStep": "login",
+                "redirectTo": "/auth/login",
+            }
+        ],
+    )
+
+
+def _registration_conflict_error_from_integrity_error(
+    exc: IntegrityError,
+) -> ApiError | None:
+    constraint_name = _integrity_constraint_name(exc)
+    error_text = " ".join(
+        str(value).lower()
+        for value in [constraint_name, getattr(exc, "orig", ""), exc]
+        if value
+    )
+    if "uq_users_document" in error_text or (
+        "document_type" in error_text and "document_number" in error_text
+    ):
+        return _document_already_exists_error()
+    if (
+        "ix_users_email" in error_text
+        or "users_email_key" in error_text
+        or "users.email" in error_text
+    ):
+        return _email_already_exists_error()
+    return None
+
+
+def _integrity_constraint_name(exc: IntegrityError) -> str | None:
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    return getattr(diag, "constraint_name", None)
 
 
 def _registration_completed(user: User) -> bool:

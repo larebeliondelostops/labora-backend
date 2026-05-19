@@ -21,14 +21,22 @@ class UserRepository:
         return self.db.get(User, parsed_user_id)
 
     def get_by_email(self, email: str) -> User | None:
-        return self.db.query(User).filter(User.email == email.lower()).one_or_none()
+        return (
+            self.db.query(User)
+            .filter(User.email == email.strip().lower())
+            .one_or_none()
+        )
 
     def get_by_document(self, document_type: str, document_number: str) -> User | None:
+        normalized_document_type = document_type.strip().upper()
+        normalized_document_number = "".join(
+            character for character in document_number.strip() if character.isalnum()
+        ).upper()
         return (
             self.db.query(User)
             .filter(
-                User.document_type == document_type,
-                User.document_number == document_number,
+                User.document_type == normalized_document_type,
+                User.document_number == normalized_document_number,
             )
             .one_or_none()
         )
