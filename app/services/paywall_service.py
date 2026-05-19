@@ -19,7 +19,11 @@ from app.repositories.audit_event_repository import AuditEventRepository
 from app.repositories.case_repository import CaseRepository
 from app.repositories.paywall_repository import PaywallRepository
 from app.repositories.pre_analysis_repository import PreAnalysisRepository
-from app.services.case_service import step_for_status
+from app.services.case_state_machine import (
+    has_confirmed_payment,
+    step_for_status,
+    validate_case_transition,
+)
 from app.services.consent_service import ConsentComplianceService
 from app.services.epayco_service import (
     EpaycoCheckoutClient,
@@ -427,6 +431,12 @@ class PaywallPreviewService:
             paywall.updated_at = now
             previous_case_status = case.status
             if not self._case_is_unlocked(case):
+                validate_case_transition(
+                    self.db,
+                    case,
+                    new_status="paid_unlocked",
+                    validate_transition=True,
+                )
                 case.status = "paid_unlocked"
                 case.status_reason = "Pago confirmado por ePayco."
                 case.current_step, case.next_best_action = step_for_status("paid_unlocked")
@@ -601,12 +611,20 @@ class PaywallPreviewService:
         preview.updated_at = preview.reviewed_at
         paywall.status = "requires_review"
         paywall.updated_at = utc_now()
-        self._transition_case(
-            case,
-            new_status="requires_review",
-            actor=user,
-            reason="Preview devuelto por revision interna.",
-        )
+        if has_confirmed_payment(self.db, case):
+            self._transition_case(
+                case,
+                new_status="requires_review",
+                actor=user,
+                reason="Preview devuelto por revision interna.",
+            )
+        else:
+            self._transition_case(
+                case,
+                new_status="preview_locked",
+                actor=user,
+                reason="Preview devuelto por revision interna antes de pago confirmado.",
+            )
         self._audit(
             PAYWALL_EVENTS["rejected"],
             actor=user,
@@ -723,12 +741,20 @@ class PaywallPreviewService:
             metadata={"previewId": str(preview.id), "requiresHumanReview": requires_review},
         )
         if requires_review:
-            self._transition_case(
-                case,
-                new_status="requires_review",
-                actor=actor,
-                reason="La vista previa requiere revision humana.",
-            )
+            if has_confirmed_payment(self.db, case):
+                self._transition_case(
+                    case,
+                    new_status="requires_review",
+                    actor=actor,
+                    reason="La vista previa requiere revision humana.",
+                )
+            elif not self._case_is_unlocked(case):
+                self._transition_case(
+                    case,
+                    new_status="preview_locked",
+                    actor=actor,
+                    reason="Vista previa requiere revision humana antes del pago confirmado.",
+                )
         elif not self._case_is_unlocked(case):
             self._transition_case(
                 case,
@@ -1017,11 +1043,17 @@ class PaywallPreviewService:
         case: LaboraCase,
         *,
         new_status: str,
-        actor: User,
+        actor: User | None,
         reason: str,
     ) -> None:
         if case.status == new_status or case.status in LOCKED_CASE_STATUSES:
             return
+        validate_case_transition(
+            self.db,
+            case,
+            new_status=new_status,
+            validate_transition=True,
+        )
         previous_status = case.status
         current_step, next_best_action = step_for_status(new_status)
         case.status = new_status
@@ -1034,7 +1066,7 @@ class PaywallPreviewService:
             previous_status=previous_status,
             new_status=new_status,
             reason=reason,
-            changed_by_user_id=actor.id,
+            changed_by_user_id=actor.id if actor else None,
             changed_by_role=self._actor_role(actor),
             source_module="paywall",
             metadata=None,

@@ -298,8 +298,89 @@ def test_internal_status_and_ai_suggestion(client_and_session) -> None:
     assert suggestion.status_code == 200
     assert suggestion.json()["caseTypeRequested"] == "labor_history_analysis"
     assert suggestion.json()["caseTypeSuggested"] == "teacher_magisterio_case"
-    assert suggestion.json()["status"] == "requires_review"
+    assert suggestion.json()["status"] == "documents_pending"
     assert "docente" in suggestion.json()["tags"]
+
+
+def test_internal_status_blocks_requires_review_without_confirmed_payment(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, _headers = _create_user(session_factory)
+    _system_id, system_headers = _create_user(session_factory, role="system")
+    case_id = _create_case_row(
+        session_factory,
+        user_id,
+        status="preview_locked",
+        current_step="preview_locked",
+        next_best_action="unlock_full_analysis",
+    )
+
+    response = client.post(
+        f"/api/v1/internal/cases/{case_id}/status",
+        json={
+            "newStatus": "requires_review",
+            "reason": "Intento de paso manual sin pago.",
+            "sourceModule": "payments",
+            "metadata": {"origin": "test"},
+        },
+        headers=system_headers,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PAYMENT_REQUIRED"
+
+
+def test_internal_status_allows_requires_review_with_confirmed_payment(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, _headers = _create_user(session_factory)
+    _system_id, system_headers = _create_user(session_factory, role="system")
+    case_id = _create_case_row(
+        session_factory,
+        user_id,
+        status="payment_approved",
+        current_step="payment_approved",
+        next_best_action="unlock_full_analysis",
+    )
+
+    response = client.post(
+        f"/api/v1/internal/cases/{case_id}/status",
+        json={
+            "newStatus": "requires_review",
+            "reason": "Revision legal posterior al pago.",
+            "sourceModule": "payments",
+            "metadata": {"origin": "test"},
+        },
+        headers=system_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["newStatus"] == "requires_review"
+
+
+def test_async_like_payments_transition_cannot_skip_to_requires_review_without_payment(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, _headers = _create_user(session_factory)
+    _system_id, system_headers = _create_user(session_factory, role="system")
+    case_id = _create_case_row(
+        session_factory,
+        user_id,
+        status="payment_pending",
+        current_step="payment_pending",
+        next_best_action="wait_payment_confirmation",
+    )
+
+    response = client.post(
+        f"/api/v1/internal/cases/{case_id}/status",
+        json={
+            "newStatus": "requires_review",
+            "reason": "Evento asincrono intenta salto.",
+            "sourceModule": "payments",
+            "metadata": {"webhook": True},
+        },
+        headers=system_headers,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PAYMENT_REQUIRED"
 
 
 def test_case_detail_serializes_documents_uploaded_preanalysis_action(client_and_session) -> None:

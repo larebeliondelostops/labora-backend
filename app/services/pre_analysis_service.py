@@ -35,7 +35,7 @@ from app.repositories.case_repository import CaseRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.extraction_repository import ExtractionRepository
 from app.repositories.pre_analysis_repository import PreAnalysisRepository
-from app.services.case_service import step_for_status
+from app.services.case_state_machine import step_for_status, validate_case_transition
 from app.services.consent_service import ConsentComplianceService
 from app.services.pre_analysis_ai_provider import (
     OUTPUT_SCHEMA_VERSION,
@@ -1353,10 +1353,27 @@ class PreAnalysisService:
     def _transition_case(self, case: LaboraCase, new_status: str, *, reason: str) -> None:
         if case.status == new_status or case.status in LOCKED_CASE_STATUSES:
             return
+        validate_case_transition(
+            self.db,
+            case,
+            new_status=new_status,
+            validate_transition=True,
+        )
+        previous_status = case.status
         case.status = new_status
         case.status_reason = reason
         case.current_step, case.next_best_action = step_for_status(new_status)
         case.updated_at = utc_now()
+        self.cases.create_status_history(
+            case_id=case.id,
+            previous_status=previous_status,
+            new_status=new_status,
+            reason=reason,
+            changed_by_user_id=None,
+            changed_by_role="system",
+            source_module="preanalysis",
+            metadata=None,
+        )
 
     def _record_history_event(
         self,

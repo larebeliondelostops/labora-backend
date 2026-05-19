@@ -35,6 +35,7 @@ from app.repositories.professional_review_repository import (
     ProfessionalReviewRepository,
 )
 from app.repositories.report_repository import ReportRepository
+from app.services.case_state_machine import has_confirmed_payment
 from app.utils.dates import utc_now
 
 
@@ -126,6 +127,13 @@ class ProfessionalReviewService:
     ) -> tuple[dict[str, Any], int]:
         case = self._get_case_or_404(case_id)
         self._require_can_request_review(case, user)
+        if not has_confirmed_payment(self.db, case):
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code="PAYMENT_REQUIRED",
+                message="Debes confirmar el pago del expediente antes de solicitar revision profesional.",
+                details={"caseId": str(case.id), "currentStatus": case.status},
+            )
         target_id = self._parse_uuid_or_error(payload.target_id, code="TARGET_NOT_FOUND", message="Documento objetivo no existe.")
         target = self._target_or_404(case=case, target_type=payload.target_type, target_id=target_id)
         existing = self.repository.active_review_for_target(

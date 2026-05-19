@@ -17,6 +17,7 @@ from app.models.user import User
 from app.repositories.case_repository import CaseRepository
 from app.repositories.document_repository import DocumentRepository
 from app.schemas.document import DocumentCreateRequest, DocumentReplaceRequest, DocumentUpdateRequest
+from app.services.case_state_machine import step_for_status, validate_case_transition
 from app.services.consent_service import ConsentComplianceService
 from app.services.document_audit_service import DocumentAuditService
 from app.services.document_job_queue import DocumentJobQueue
@@ -920,10 +921,28 @@ class DocumentService:
     def _mark_case_documents_uploaded(self, case: LaboraCase) -> None:
         if case.status not in {"created", "ready_for_documents", "documents_pending"}:
             return
+        previous_status = case.status
+        validate_case_transition(
+            self.db,
+            case,
+            new_status="documents_uploaded",
+            validate_transition=True,
+        )
+        current_step, next_best_action = step_for_status("documents_uploaded")
         case.status = "documents_uploaded"
-        case.current_step = "documents_uploaded"
-        case.next_best_action = "start_preanalysis"
+        case.current_step = current_step
+        case.next_best_action = next_best_action
         case.updated_at = utc_now()
+        self.cases.create_status_history(
+            case_id=case.id,
+            previous_status=previous_status,
+            new_status=case.status,
+            reason="Documentos cargados.",
+            changed_by_user_id=None,
+            changed_by_role="system",
+            source_module="documents",
+            metadata=None,
+        )
 
     def _get_case_or_404(self, case_id: str | uuid.UUID) -> LaboraCase:
         case = self.cases.get(case_id)

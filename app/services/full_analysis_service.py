@@ -33,7 +33,7 @@ from app.repositories.full_analysis_repository import ACTIVE_STATUSES, FullAnaly
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.pre_analysis_repository import PreAnalysisRepository
 from app.services.calculation_service import CalculationService
-from app.services.case_service import step_for_status
+from app.services.case_state_machine import step_for_status, validate_case_transition
 from app.services.consent_service import ConsentComplianceService
 from app.services.legal_rules_service import LegalRulesService
 from app.utils.dates import utc_now
@@ -1069,6 +1069,12 @@ class FullAnalysisService:
     def _transition_case(self, case: LaboraCase, *, new_status: str, reason: str) -> None:
         if case.status == new_status or case.status in {"closed", "archived"}:
             return
+        validate_case_transition(
+            self.db,
+            case,
+            new_status=new_status,
+            validate_transition=True,
+        )
         previous_status = case.status
         case.status = new_status
         case.status_reason = reason

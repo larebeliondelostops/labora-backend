@@ -90,20 +90,18 @@ def test_backoffice_case_queue_detail_notes_and_status_are_rbac_protected(client
         },
         headers=manager_headers,
     )
-    assert updated.status_code == 200
-    assert updated.json()["adminStatus"] == "requires_review"
-    assert updated.json()["blocking"] is True
+    assert updated.status_code == 409
+    assert updated.json()["error"]["code"] == "PAYMENT_REQUIRED"
 
     db = session_factory()
     try:
         assert db.query(InternalNote).filter(InternalNote.case_id == UUID(case_id)).count() == 1
-        queue_item = db.query(CaseQueueItem).filter(CaseQueueItem.case_id == UUID(case_id)).one()
-        assert queue_item.admin_status == "requires_review"
-        assert queue_item.has_blocking_issue is True
+        queue_items = db.query(CaseQueueItem).filter(CaseQueueItem.case_id == UUID(case_id)).all()
+        assert queue_items == []
         audit_types = {event.event_type for event in db.query(AdminAuditEvent).all()}
         assert "backoffice_admin.viewed" in audit_types
         assert "admin.note.created" in audit_types
-        assert "admin.case.status_changed" in audit_types
+        assert "admin.case.status_changed" not in audit_types
     finally:
         db.close()
 

@@ -38,6 +38,7 @@ from app.schemas.extraction import (
     ManualEmployerCreateRequest,
     ManualLaborPeriodCreateRequest,
 )
+from app.services.case_state_machine import step_for_status, validate_case_transition
 from app.services.consent_service import ConsentComplianceService
 from app.services.extraction_ai_provider import (
     AiExtractionProviderError,
@@ -606,10 +607,28 @@ class ExtractionService:
             user_agent=user_agent,
         )
         if case.status == "documents_uploaded":
+            validate_case_transition(
+                self.db,
+                case,
+                new_status="preanalysis_pending",
+                validate_transition=True,
+            )
+            previous_status = case.status
+            current_step, next_best_action = step_for_status("preanalysis_pending")
             case.status = "preanalysis_pending"
-            case.current_step = "preanalysis_pending"
-            case.next_best_action = "start_preanalysis"
+            case.current_step = current_step
+            case.next_best_action = next_best_action
             case.updated_at = now
+            self.cases.create_status_history(
+                case_id=case.id,
+                previous_status=previous_status,
+                new_status=case.status,
+                reason="Extraccion confirmada por el usuario.",
+                changed_by_user_id=user.id,
+                changed_by_role="user",
+                source_module="documents",
+                metadata={"origin": "extraction_confirmation"},
+            )
         event_name = (
             "extraction.confirmed_with_pending_fields"
             if confirmation_status == "confirmed_with_pending_fields"

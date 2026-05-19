@@ -20,7 +20,7 @@ from app.repositories.audit_event_repository import AuditEventRepository
 from app.repositories.case_repository import CaseRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.paywall_repository import PaywallRepository
-from app.services.case_service import step_for_status
+from app.services.case_state_machine import step_for_status, validate_case_transition
 from app.services.consent_service import ConsentComplianceService
 from app.services.epayco_service import (
     EpaycoCheckoutClient,
@@ -1367,6 +1367,12 @@ class PaymentService:
     ) -> None:
         if case.status == new_status:
             return
+        validate_case_transition(
+            self.db,
+            case,
+            new_status=new_status,
+            validate_transition=True,
+        )
         previous_status = case.status
         current_step, next_best_action = step_for_status(new_status)
         case.status = new_status

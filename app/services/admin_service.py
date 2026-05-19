@@ -19,7 +19,7 @@ from app.models.admin import (
     CaseQueueItem,
     InternalNote,
 )
-from app.models.case import CaseHistoryEvent, CaseOwner, LaboraCase
+from app.models.case import CaseHistoryEvent, CaseOwner, CaseStatusHistory, LaboraCase
 from app.models.consent import UserConsent
 from app.models.document import Document, DocumentPage, DocumentValidation
 from app.models.extraction import (
@@ -59,7 +59,11 @@ from app.schemas.admin import (
     ResolveAiAlertRequest,
     ReviewDecisionRequest,
 )
-from app.services.case_service import CASE_STATUSES, step_for_status
+from app.services.case_state_machine import (
+    CASE_STATUSES,
+    step_for_status,
+    validate_case_transition,
+)
 from app.utils.dates import utc_now
 
 
@@ -551,10 +555,30 @@ class AdminService:
         queue_item.last_activity_at = utc_now()
         queue_item.updated_at = utc_now()
         if status_value in CASE_STATUSES:
+            previous_case_status = case.status
+            validate_case_transition(
+                self.db,
+                case,
+                new_status=status_value,
+                validate_transition=True,
+            )
             case.status = status_value
             case.status_reason = payload.reason
             case.current_step, case.next_best_action = step_for_status(status_value)
             case.updated_at = utc_now()
+            if previous_case_status != case.status:
+                self.db.add(
+                    CaseStatusHistory(
+                        case_id=case.id,
+                        previous_status=previous_case_status,
+                        new_status=case.status,
+                        reason=payload.reason,
+                        changed_by_user_id=context.admin_user.id,
+                        changed_by_role="admin",
+                        source_module="admin",
+                        metadata_json={"adminStatus": status_value},
+                    )
+                )
         self._record_case_history(
             case_id=case.id,
             actor=context,
@@ -1196,10 +1220,30 @@ class AdminService:
             )
         previous_state = self._case_state(case)
         if payload.unlock_full_analysis:
+            previous_case_status = case.status
+            validate_case_transition(
+                self.db,
+                case,
+                new_status="full_analysis_unlocked",
+                validate_transition=True,
+            )
             case.status = "full_analysis_unlocked"
             case.status_reason = payload.reason
             case.current_step, case.next_best_action = step_for_status("full_analysis_unlocked")
             case.updated_at = utc_now()
+            if previous_case_status != case.status:
+                self.db.add(
+                    CaseStatusHistory(
+                        case_id=case.id,
+                        previous_status=previous_case_status,
+                        new_status=case.status,
+                        reason=payload.reason,
+                        changed_by_user_id=context.admin_user.id,
+                        changed_by_role="admin",
+                        source_module="admin",
+                        metadata_json={"unlockFullAnalysis": True},
+                    )
+                )
         queue_item = self._ensure_queue_item(case)
         queue_item.payment_status = "admin_override_unlocked"
         queue_item.admin_status = "payment_confirmed"
