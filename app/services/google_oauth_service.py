@@ -117,7 +117,7 @@ class GoogleOAuthService:
         return GoogleUserProfile(
             provider="google",
             provider_user_id=str(id_info["sub"]),
-            email=str(id_info["email"]).lower(),
+            email=str(id_info["email"]).strip().lower(),
             email_verified=id_info.get("email_verified") is True,
             full_name=id_info.get("name"),
             first_name=id_info.get("given_name"),

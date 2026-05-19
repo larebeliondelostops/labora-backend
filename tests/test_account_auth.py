@@ -136,7 +136,7 @@ def test_pending_google_account_user_points_front_to_otp() -> None:
     assert data["nextStep"] == "verify_otp"
 
 
-def test_google_profile_creates_pending_passwordless_user() -> None:
+def test_google_profile_creates_verified_passwordless_user() -> None:
     class FakeDb:
         def add(self, item):
             self.item = item
@@ -157,8 +157,9 @@ def test_google_profile_creates_pending_passwordless_user() -> None:
 
     assert user.email == "jorge@example.com"
     assert user.password_hash is None
-    assert user.status == "pending_verification"
-    assert user.is_verified is False
+    assert user.status == "active"
+    assert user.is_verified is True
+    assert user.email_verified_at is not None
 
 
 def test_verified_google_account_without_document_points_front_to_profile() -> None:
@@ -186,6 +187,66 @@ def test_verified_google_account_without_document_points_front_to_profile() -> N
     assert data["requiresOtp"] is False
     assert data["registrationCompleted"] is False
     assert data["nextStep"] == "complete_profile"
+
+
+def test_verified_google_account_with_profile_points_front_to_dashboard() -> None:
+    user = SimpleNamespace(
+        id=uuid4(),
+        first_name="Jorge",
+        last_name="Hernandez",
+        full_name="Jorge Hernandez",
+        avatar_url=None,
+        document_type="CC",
+        document_number="1020304050",
+        phone=None,
+        email="jorge@example.com",
+        status="active",
+        email_verified_at=datetime.utcnow(),
+        is_verified=True,
+        phone_verified_at=None,
+        role="user",
+        created_at=None,
+    )
+
+    account_user = AccountAuthService(db=None)._account_user(user)
+    data = account_user.model_dump(by_alias=True)
+
+    assert data["requiresOtp"] is False
+    assert data["registrationCompleted"] is True
+    assert data["nextStep"] == "dashboard"
+
+
+def test_users_me_next_step_can_require_consents(monkeypatch) -> None:
+    user = SimpleNamespace(
+        id=uuid4(),
+        first_name="Jorge",
+        last_name="Hernandez",
+        full_name="Jorge Hernandez",
+        avatar_url=None,
+        document_type="CC",
+        document_number="1020304050",
+        phone=None,
+        email="jorge@example.com",
+        status="active",
+        email_verified_at=datetime.utcnow(),
+        is_verified=True,
+        phone_verified_at=None,
+        role="user",
+        created_at=None,
+    )
+
+    monkeypatch.setattr(
+        "app.services.consent_service.ConsentComplianceService.get_status",
+        lambda self, user_id: SimpleNamespace(status="not_started"),
+    )
+
+    account_user = AccountAuthService(db=object())._account_user(
+        user,
+        include_consent_step=True,
+    )
+    data = account_user.model_dump(by_alias=True)
+
+    assert data["nextStep"] == "consents"
 
 
 def test_profile_update_accepts_registration_fields() -> None:

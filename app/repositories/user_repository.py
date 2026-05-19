@@ -1,3 +1,4 @@
+from datetime import datetime
 import uuid
 from typing import Any
 
@@ -61,8 +62,9 @@ class UserRepository:
         return user
 
     def create_from_google_profile(self, profile: Any) -> User:
+        email_verified = profile.email_verified is True
         user = User(
-            email=profile.email.lower(),
+            email=profile.email.strip().lower(),
             password_hash=None,
             first_name=profile.first_name,
             last_name=profile.last_name,
@@ -70,14 +72,21 @@ class UserRepository:
             avatar_url=profile.avatar_url,
             role="user",
             is_active=True,
-            is_verified=False,
-            status="pending_verification",
+            is_verified=email_verified,
+            status="active" if email_verified else "pending_verification",
+            email_verified_at=datetime.utcnow() if email_verified else None,
         )
         self.db.add(user)
         self.db.flush()
         return user
 
     def update_from_google_profile(self, user: User, profile: Any) -> User:
+        if profile.email_verified is True:
+            user.email = profile.email.strip().lower()
+            user.is_verified = True
+            user.email_verified_at = user.email_verified_at or datetime.utcnow()
+            if user.status == "pending_verification":
+                user.status = "active"
         if profile.first_name and not user.first_name:
             user.first_name = profile.first_name
         if profile.last_name and not user.last_name:

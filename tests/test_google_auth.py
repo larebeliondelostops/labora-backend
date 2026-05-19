@@ -3,16 +3,68 @@ from types import SimpleNamespace
 from uuid import uuid4
 from urllib.parse import parse_qs, urlparse
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
+from app.core.database import Base
 from app.core.security import hash_oauth_value
 from app.main import app
+from app.models.external_auth_account import ExternalAuthAccount
+from app.models.user import User
 from app.repositories.oauth_state_repository import OAuthStateRepository
 from app.services.account_auth_service import AccountAuthService
 from app.services.auth_service import AuthService
-from app.services.google_oauth_service import GoogleOAuthService
+from app.services.google_oauth_service import (
+    EmailNotVerifiedError,
+    GoogleOAuthService,
+    GoogleUserProfile,
+)
 
 client = TestClient(app)
+
+GOOGLE_AUTH_TABLES = [User.__table__, ExternalAuthAccount.__table__]
+
+
+@pytest.fixture()
+def google_auth_session():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    TestingSessionLocal = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=engine,
+    )
+    Base.metadata.create_all(engine, tables=GOOGLE_AUTH_TABLES)
+    db = TestingSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+        Base.metadata.drop_all(engine, tables=list(reversed(GOOGLE_AUTH_TABLES)))
+
+
+def _google_profile(
+    *,
+    email: str = "ANA@EXAMPLE.COM",
+    provider_user_id: str = "google-user-1",
+    email_verified: bool = True,
+) -> GoogleUserProfile:
+    return GoogleUserProfile(
+        provider="google",
+        provider_user_id=provider_user_id,
+        email=email,
+        email_verified=email_verified,
+        full_name="Ana Gomez",
+        first_name="Ana",
+        last_name="Gomez",
+        avatar_url="https://example.com/avatar.png",
+    )
 
 
 def test_google_login_redirect_creates_state(monkeypatch) -> None:
@@ -44,7 +96,7 @@ def test_google_login_redirect_creates_state(monkeypatch) -> None:
     assert query["nonce"][0]
 
     assert created_state["provider"] == "google"
-    assert created_state["redirect_to"] == "/dashboard"
+    assert created_state["redirect_to"] == "/app/dashboard"
     assert created_state["state_hash"] == hash_oauth_value(query["state"][0])
     assert created_state["nonce_hash"] == hash_oauth_value(query["nonce"][0])
 
@@ -105,7 +157,69 @@ def test_google_login_rejects_external_redirect(monkeypatch) -> None:
     )
 
     assert response.status_code == 307
-    assert created_state["redirect_to"] == "/dashboard"
+    assert created_state["redirect_to"] == "/app/dashboard"
+
+
+def test_complete_google_login_existing_email_verifies_and_links_provider(
+    google_auth_session,
+) -> None:
+    db = google_auth_session
+    user = User(
+        email="ana@example.com",
+        first_name=None,
+        last_name=None,
+        full_name=None,
+        password_hash=None,
+        role="user",
+        is_active=True,
+        is_verified=False,
+        status="pending_verification",
+    )
+    db.add(user)
+    db.commit()
+
+    returned_user = AuthService(db).complete_google_login(_google_profile())
+
+    assert returned_user.id == user.id
+    assert returned_user.email == "ana@example.com"
+    assert returned_user.status == "active"
+    assert returned_user.is_verified is True
+    assert returned_user.email_verified_at is not None
+
+    account = db.query(ExternalAuthAccount).one()
+    assert account.user_id == user.id
+    assert account.provider == "google"
+    assert account.provider_user_id == "google-user-1"
+    assert account.provider_email == "ana@example.com"
+    assert account.provider_email_verified is True
+
+
+def test_complete_google_login_new_user_is_verified_passwordless(
+    google_auth_session,
+) -> None:
+    db = google_auth_session
+
+    user = AuthService(db).complete_google_login(_google_profile())
+
+    assert user.email == "ana@example.com"
+    assert user.password_hash is None
+    assert user.status == "active"
+    assert user.is_verified is True
+    assert user.email_verified_at is not None
+    assert db.query(ExternalAuthAccount).count() == 1
+
+
+def test_complete_google_login_rejects_unverified_google_email(
+    google_auth_session,
+) -> None:
+    db = google_auth_session
+
+    with pytest.raises(EmailNotVerifiedError):
+        AuthService(db).complete_google_login(
+            _google_profile(email_verified=False),
+        )
+
+    assert db.query(User).count() == 0
 
 
 def test_google_callback_invalid_state_redirects_error(monkeypatch) -> None:
@@ -155,7 +269,7 @@ def test_google_callback_success_sets_cookie(monkeypatch) -> None:
         consumed=False,
         expires_at=datetime.utcnow() + timedelta(minutes=1),
         nonce_hash=hash_oauth_value("nonce"),
-        redirect_to="/dashboard",
+        redirect_to="/app/dashboard",
     )
     user = SimpleNamespace(id=uuid4(), role="user")
     profile = SimpleNamespace(email="user@example.com")
@@ -198,7 +312,8 @@ def test_google_callback_success_sets_cookie(monkeypatch) -> None:
             "refreshToken": "backend-refresh-token",
             "expiresIn": 900,
             "sessionId": str(uuid4()),
-            "user": {"requiresOtp": False},
+            "user": {"requiresOtp": False, "nextStep": "dashboard"},
+            "nextStep": "dashboard",
         },
     )
 
@@ -208,13 +323,15 @@ def test_google_callback_success_sets_cookie(monkeypatch) -> None:
     )
 
     assert response.status_code == 303
-    assert response.headers["location"] == "http://localhost:3000/dashboard?auth=success"
+    assert response.headers["location"] == (
+        "http://localhost:3000/app/dashboard?auth=success&nextStep=dashboard"
+    )
     assert "labora_access_token" in response.headers["set-cookie"]
     assert "HttpOnly" in response.headers["set-cookie"]
     assert "fake-id-token" not in response.headers["location"]
 
 
-def test_google_callback_registration_redirect_keeps_next_query(monkeypatch) -> None:
+def test_google_callback_registration_redirect_does_not_send_otp(monkeypatch) -> None:
     oauth_state = SimpleNamespace(
         consumed=False,
         expires_at=datetime.utcnow() + timedelta(minutes=1),
@@ -262,14 +379,22 @@ def test_google_callback_registration_redirect_keeps_next_query(monkeypatch) -> 
             "refreshToken": "backend-refresh-token",
             "expiresIn": 900,
             "sessionId": str(uuid4()),
-            "user": {"requiresOtp": True},
+            "user": {
+                "requiresOtp": False,
+                "registrationCompleted": False,
+                "nextStep": "complete_profile",
+            },
+            "nextStep": "complete_profile",
         },
     )
-    sent_otp: dict = {}
+
+    def fail_send_otp(self, user, ip_address, user_agent):
+        raise AssertionError("Google OAuth callback must not send OTP")
+
     monkeypatch.setattr(
         AccountAuthService,
         "send_register_otp_for_user",
-        lambda self, user, ip_address, user_agent: sent_otp.update({"sent": True}),
+        fail_send_otp,
     )
 
     response = client.get(
@@ -289,7 +414,7 @@ def test_google_callback_registration_redirect_keeps_next_query(monkeypatch) -> 
     assert query["next"] == ["/registro?step=datos"]
     assert query["auto"] == ["1"]
     assert query["auth"] == ["success"]
-    assert sent_otp == {"sent": True}
+    assert query["nextStep"] == ["complete_profile"]
 
 
 def test_logout_clears_cookie() -> None:

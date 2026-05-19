@@ -601,10 +601,18 @@ class AccountAuthService:
             "sessionId": str(session.id),
         }
 
-    def _account_user(self, user: User) -> AccountUser:
+    def _account_user(
+        self,
+        user: User,
+        *,
+        include_consent_step: bool = False,
+    ) -> AccountUser:
         email_verified = user.email_verified_at is not None or user.is_verified
         registration_completed = _registration_completed(user)
         requires_otp = user.status == "pending_verification" or not email_verified
+        next_step = _next_step(user, requires_otp, registration_completed)
+        if include_consent_step and next_step == "dashboard":
+            next_step = self._next_step_with_consents(user, next_step)
         return AccountUser(
             id=str(user.id),
             first_name=user.first_name,
@@ -620,10 +628,21 @@ class AccountAuthService:
             phone_verified=user.phone_verified_at is not None,
             requires_otp=requires_otp,
             registration_completed=registration_completed,
-            next_step=_next_step(user, requires_otp, registration_completed),
+            next_step=next_step,
             roles=[user.role],
             created_at=user.created_at,
         )
+
+    def _next_step_with_consents(self, user: User, fallback: str) -> str:
+        if self.db is None:
+            return fallback
+
+        from app.services.consent_service import ConsentComplianceService
+
+        consent_status = ConsentComplianceService(self.db).get_status(user.id).status
+        if consent_status in {"not_started", "in_progress"}:
+            return "consents"
+        return fallback
 
     def _audit(
         self,

@@ -20,7 +20,10 @@ def get_me(
     db: Session = Depends(get_db),
 ) -> dict:
     user, _payload = context
-    account_user = AccountAuthService(db)._account_user(user)
+    account_user = AccountAuthService(db)._account_user(
+        user,
+        include_consent_step=True,
+    )
     return {"data": account_user.model_dump(by_alias=True)}
 
 

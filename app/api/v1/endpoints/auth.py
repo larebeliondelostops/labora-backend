@@ -39,7 +39,10 @@ from app.services.google_oauth_service import (
 router = APIRouter()
 
 
-def _safe_relative_redirect(redirect_to: str | None, default: str = "/dashboard") -> str:
+def _safe_relative_redirect(
+    redirect_to: str | None,
+    default: str = "/app/dashboard",
+) -> str:
     if (
         not redirect_to
         or not redirect_to.startswith("/")
@@ -59,7 +62,10 @@ def _allowed_frontend_origins() -> set[str]:
     return origins
 
 
-def _safe_redirect_target(redirect_to: str | None, default: str = "/dashboard") -> str:
+def _safe_redirect_target(
+    redirect_to: str | None,
+    default: str = "/app/dashboard",
+) -> str:
     if not redirect_to:
         return default
 
@@ -69,7 +75,9 @@ def _safe_redirect_target(redirect_to: str | None, default: str = "/dashboard") 
         origin = f"{parsed.scheme}://{parsed.netloc}"
         if origin not in _allowed_frontend_origins():
             return default
-        relative_url = urlunsplit(("", "", parsed.path or "/", parsed.query, parsed.fragment))
+        relative_url = urlunsplit(
+            ("", "", parsed.path or "/", parsed.query, parsed.fragment)
+        )
         return _safe_relative_redirect(relative_url, default)
 
     return _safe_relative_redirect(candidate, default)
@@ -384,6 +392,8 @@ def google_callback(
 
     try:
         user = AuthService(db).complete_google_login(profile)
+    except EmailNotVerifiedError:
+        return _error_redirect("email_not_verified")
     except UserDisabledError:
         return _error_redirect("user_disabled")
 
@@ -393,17 +403,30 @@ def google_callback(
         ip_address=get_client_ip(request),
         user_agent=get_user_agent(request),
     )
-    account_user = session_data.get("user", {})
-    if account_user.get("requiresOtp") is True:
-        account_auth.send_register_otp_for_user(
-            user=user,
-            ip_address=get_client_ip(request),
-            user_agent=get_user_agent(request),
-        )
+    next_step = _google_callback_next_step(session_data)
 
     response = RedirectResponse(
-        _frontend_url(oauth_state.redirect_to, {"auth": "success"}),
+        _frontend_url(
+            oauth_state.redirect_to,
+            {"auth": "success", "nextStep": next_step},
+        ),
         status_code=303,
     )
     _set_auth_cookie(response, session_data["accessToken"])
     return response
+
+
+def _google_callback_next_step(session_data: dict) -> str:
+    account_user = session_data.get("user", {})
+    next_step = (
+        session_data.get("nextStep")
+        or account_user.get("nextStep")
+        or "dashboard"
+    )
+    if next_step == "verify_otp":
+        return (
+            "complete_profile"
+            if account_user.get("registrationCompleted") is False
+            else "dashboard"
+        )
+    return next_step
