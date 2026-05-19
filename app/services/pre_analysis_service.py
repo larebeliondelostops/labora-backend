@@ -23,7 +23,7 @@ from app.models.extraction import (
     LaborPeriod,
     SalaryBase,
 )
-from app.models.pre_analysis import PreAnalysis, PreAnalysisJob, PreViability
+from app.models.pre_analysis import MissingDocument, PreAnalysis, PreAnalysisJob, PreIssue, PreViability
 from app.models.questionnaire import (
     CaseProfile,
     CaseQuestionnaireSession,
@@ -57,6 +57,12 @@ READY_EXTRACTION_STATUSES = {"completed", "requires_review"}
 RETRYABLE_STATUSES = {"error", "blocked"}
 LOW_CONFIDENCE_THRESHOLD = Decimal("0.7000")
 EXTRACTOR_VERSION = "extraction-summary-v1"
+PARTIAL_INPUT_WARNING_CODES = {
+    "missing_main_document": "MISSING_MAIN_DOCUMENT",
+    "document_rejected": "DOCUMENT_VALIDATION_LIMITED",
+    "extraction_not_ready": "EXTRACTION_NOT_READY",
+    "questionnaire_required": "QUESTIONNAIRE_REQUIRED",
+}
 
 CTA_COPY = {
     "unlock_full_analysis": {
@@ -441,17 +447,16 @@ class PreAnalysisService:
             pre_analysis.ai_model = result.model
             job.progress = Decimal("70.00")
             job.current_step = "Validando resultado preliminar"
-            sanitized = self.apply_visibility_rules(result.output.model_dump(by_alias=True))
+            sanitized = self.apply_visibility_rules(
+                result.output.model_dump(by_alias=True),
+                input_warnings=inputs["inputWarnings"],
+            )
             self.persist_result(pre_analysis, sanitized)
             job.progress = Decimal("90.00")
-            next_status = (
-                "requires_review"
-                if _decimal(sanitized["confidence"]) < LOW_CONFIDENCE_THRESHOLD
-                else "completed"
-            )
+            next_status = "completed"
             previous_status = pre_analysis.status
             pre_analysis.status = next_status
-            pre_analysis.cta_type = "wait_review" if next_status == "requires_review" else sanitized["ctaType"]
+            pre_analysis.cta_type = sanitized["ctaType"]
             pre_analysis.completed_at = utc_now()
             pre_analysis.updated_at = pre_analysis.completed_at
             job.status = "completed"
@@ -460,7 +465,7 @@ class PreAnalysisService:
             job.finished_at = pre_analysis.completed_at
             self._transition_case(
                 case,
-                "requires_review" if next_status == "requires_review" else "preanalysis_ready",
+                "preanalysis_ready",
                 reason="Preanalisis preliminar finalizado.",
             )
             self._record_history_event(
@@ -468,7 +473,7 @@ class PreAnalysisService:
                 event_type=PRE_ANALYSIS_EVENTS[next_status],
                 title="Preanalisis preliminar disponible",
                 description="El resultado preliminar ya puede consultarse.",
-                severity="warning" if next_status == "requires_review" else "success",
+                severity="success",
                 actor=actor,
                 metadata={"preAnalysisId": str(pre_analysis.id)},
             )
@@ -483,9 +488,8 @@ class PreAnalysisService:
                 ip_address=ip_address,
                 user_agent=user_agent,
             )
-            terminal_event = "requires_review" if next_status == "requires_review" else "completed"
             self._audit(
-                PRE_ANALYSIS_EVENTS[terminal_event],
+                PRE_ANALYSIS_EVENTS["completed"],
                 actor=actor,
                 case=case,
                 pre_analysis=pre_analysis,
@@ -657,47 +661,20 @@ class PreAnalysisService:
                 user_agent=user_agent,
             )
 
+        input_warnings: list[dict[str, Any]] = []
         documents = self._main_documents(case)
         if not documents:
-            self._raise_blocked(
-                case=case,
-                actor=actor,
-                blocked_reason="missing_main_document",
-                message="No podemos iniciar el preanalisis porque falta un documento principal.",
-                ip_address=ip_address,
-                user_agent=user_agent,
-            )
-        if not self._has_compatible_document_validation(documents):
-            self._raise_blocked(
-                case=case,
-                actor=actor,
-                blocked_reason="document_rejected",
-                message="No podemos iniciar el preanalisis porque la validacion documental no es compatible.",
-                ip_address=ip_address,
-                user_agent=user_agent,
-            )
+            input_warnings.append(self._input_warning("missing_main_document"))
+        elif not self._has_compatible_document_validation(documents):
+            input_warnings.append(self._input_warning("document_rejected"))
 
         extraction_run = self.extractions.latest_run(case.id)
         if not self._has_minimum_extraction(case=case, documents=documents, run=extraction_run):
-            self._raise_blocked(
-                case=case,
-                actor=actor,
-                blocked_reason="extraction_not_ready",
-                message="No podemos iniciar el preanalisis porque la extraccion basica no esta lista.",
-                ip_address=ip_address,
-                user_agent=user_agent,
-            )
+            input_warnings.append(self._input_warning("extraction_not_ready"))
 
         if self._questionnaire_required(case) and not self._has_completed_questionnaire(case.id):
-            self._raise_blocked(
-                case=case,
-                actor=actor,
-                blocked_reason="questionnaire_required",
-                message="No podemos iniciar el preanalisis porque falta el cuestionario minimo.",
-                ip_address=ip_address,
-                user_agent=user_agent,
-            )
-        return {"documents": documents, "extractionRun": extraction_run}
+            input_warnings.append(self._input_warning("questionnaire_required"))
+        return {"documents": documents, "extractionRun": extraction_run, "inputWarnings": input_warnings}
 
     def build_ai_input(self, *, case: LaboraCase, documents: list[Document]) -> dict[str, Any]:
         document_types = sorted(
@@ -753,9 +730,15 @@ class PreAnalysisService:
             "questionnaireSummary": questionnaire_summary,
         }
 
-    def apply_visibility_rules(self, output: dict[str, Any]) -> dict[str, Any]:
+    def apply_visibility_rules(
+        self,
+        output: dict[str, Any],
+        *,
+        input_warnings: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         self._assert_no_prohibited_keys(output)
         sanitized = _sanitize_payload(output)
+        input_warnings = input_warnings or []
         issues = [
             {
                 "type": _allowed_issue_type(item.get("type")),
@@ -781,6 +764,29 @@ class PreAnalysisService:
             for item in sanitized.get("missingDocuments", [])[:8]
             if isinstance(item, dict)
         ]
+        if any(item.get("code") == "MISSING_MAIN_DOCUMENT" for item in input_warnings):
+            missing_documents.append(
+                {
+                    "documentType": "historia_laboral",
+                    "title": "Historia laboral",
+                    "priority": "required",
+                    "reason": "No encontramos un documento principal para el preanalisis.",
+                    "status": "pending",
+                    "uploadHint": "Carga la historia laboral completa y legible para mejorar el resultado.",
+                }
+            )
+        if any(item.get("code") == "QUESTIONNAIRE_REQUIRED" for item in input_warnings):
+            issues.append(
+                {
+                    "type": "insufficient_information",
+                    "severity": "medium",
+                    "title": "Faltan datos del cuestionario",
+                    "publicSummary": "El preanalisis se genero con datos parciales del caso.",
+                    "lockedDetailAvailable": True,
+                    "evidenceRefs": [],
+                    "confidence": Decimal("0.5500"),
+                }
+            )
         case_signals = [
             {
                 "signalType": _safe_code(item.get("signalType") or "preliminary_signal", limit=80),
@@ -798,6 +804,11 @@ class PreAnalysisService:
         completion_score = _completion_score(sanitized.get("completionScore"))
         traffic_light = _allowed_traffic_light(sanitized.get("trafficLight"))
         viability_level = _allowed_viability_level(sanitized.get("viabilityLevel"))
+        if input_warnings:
+            confidence = min(confidence, Decimal("0.6500"))
+            completion_score = min(completion_score, Decimal("60.00"))
+            traffic_light = "gray"
+            viability_level = "insufficient"
         if confidence < LOW_CONFIDENCE_THRESHOLD:
             traffic_light = "gray"
             viability_level = "insufficient"
@@ -1001,24 +1012,13 @@ class PreAnalysisService:
         return self.db.query(CaseProfile).filter(CaseProfile.case_id == case_id).one_or_none()
 
     def _user_result_payload(self, pre_analysis: PreAnalysis) -> dict[str, Any]:
-        warnings = [
-            {
-                "code": "PRELIMINARY_ONLY",
-                "message": "Este resultado es preliminar y no reemplaza el analisis completo.",
-            }
-        ]
-        if pre_analysis.status == "requires_review" or (
-            pre_analysis.confidence is not None and Decimal(pre_analysis.confidence) < LOW_CONFIDENCE_THRESHOLD
-        ):
-            warnings.append(
-                {
-                    "code": "LOW_CONFIDENCE_REVIEW",
-                    "message": (
-                        "El resultado requiere revision por baja confianza. Para mejorarla, "
-                        "completa los datos clave y sube soportes claros del caso."
-                    ),
-                }
-            )
+        issues = self.pre_analysis.list_visible_issues(pre_analysis.id)
+        missing_documents = self.pre_analysis.list_missing_documents(pre_analysis.id)
+        warnings = self._result_warnings(
+            pre_analysis=pre_analysis,
+            issues=issues,
+            missing_documents=missing_documents,
+        )
         return {
             "id": str(pre_analysis.id),
             "caseId": str(pre_analysis.case_id),
@@ -1034,10 +1034,10 @@ class PreAnalysisService:
                 "title": pre_analysis.value_detected_title,
                 "summary": pre_analysis.value_detected_summary,
             },
-            "issues": [self._issue_payload(issue) for issue in self.pre_analysis.list_visible_issues(pre_analysis.id)],
+            "issues": [self._issue_payload(issue) for issue in issues],
             "missingDocuments": [
                 self._missing_document_payload(item)
-                for item in self.pre_analysis.list_missing_documents(pre_analysis.id)
+                for item in missing_documents
             ],
             "cta": self._cta(pre_analysis.cta_type),
             "warnings": warnings,
@@ -1118,6 +1118,56 @@ class PreAnalysisService:
             "confidenceThreshold": float(LOW_CONFIDENCE_THRESHOLD),
             "actions": REVIEW_GUIDANCE_ACTIONS,
         }
+
+    def _result_warnings(
+        self,
+        *,
+        pre_analysis: PreAnalysis,
+        issues: list[PreIssue],
+        missing_documents: list[MissingDocument],
+    ) -> list[dict[str, str]]:
+        warnings = [
+            {
+                "code": "PRELIMINARY_ONLY",
+                "message": "Este resultado es preliminar y no reemplaza el analisis completo.",
+            }
+        ]
+        if missing_documents:
+            warnings.append(
+                {
+                    "code": "MISSING_SUPPORTING_DOCUMENTS",
+                    "message": "Detectamos soportes faltantes. El resultado se genero con la informacion disponible.",
+                }
+            )
+        has_incomplete_issue = any(
+            item.issue_type in {"insufficient_information", "missing_documents"}
+            for item in issues
+        )
+        if has_incomplete_issue or pre_analysis.viability_level == "insufficient":
+            warnings.append(
+                {
+                    "code": "INCOMPLETE_INFORMATION",
+                    "message": "Hay datos incompletos. La orientacion mostrada es conservadora.",
+                }
+            )
+        if pre_analysis.confidence is not None and Decimal(pre_analysis.confidence) < LOW_CONFIDENCE_THRESHOLD:
+            warnings.append(
+                {
+                    "code": "LOW_CONFIDENCE_REVIEW",
+                    "message": (
+                        "La confianza preliminar es baja. Puedes mejorarla completando datos clave y cargando "
+                        "soportes adicionales, pero el preanalisis ya se genero con lo disponible."
+                    ),
+                }
+            )
+        if pre_analysis.status == "requires_review":
+            warnings.append(
+                {
+                    "code": "HUMAN_REVIEW_REQUIRED",
+                    "message": "Este caso requiere revision humana obligatoria antes de continuar.",
+                }
+            )
+        return warnings
 
     def _admin_item(self, item: PreAnalysis) -> dict[str, Any]:
         return {
@@ -1416,6 +1466,16 @@ class PreAnalysisService:
             code="PRE_ANALYSIS_VALIDATION_ERROR",
             message="Identificador UUID invalido.",
         )
+
+    def _input_warning(self, blocked_reason: str) -> dict[str, str]:
+        code = PARTIAL_INPUT_WARNING_CODES.get(blocked_reason, "PARTIAL_INPUT")
+        messages = {
+            "missing_main_document": "No hay documento principal; se generara un preanalisis con datos parciales.",
+            "document_rejected": "La calidad documental es limitada; el resultado puede tener menor precision.",
+            "extraction_not_ready": "La extraccion estructurada no esta lista; usamos las senales disponibles.",
+            "questionnaire_required": "Falta el cuestionario minimo; se aplicara una lectura conservadora.",
+        }
+        return {"code": code, "message": messages.get(blocked_reason, "Preanalisis con insumos parciales.")}
 
 
 def _progress(pre_analysis: PreAnalysis, job: PreAnalysisJob | None) -> int:

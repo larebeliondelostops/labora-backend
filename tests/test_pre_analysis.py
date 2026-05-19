@@ -196,7 +196,7 @@ def test_pre_analysis_blocks_foreign_user_access(client_and_session) -> None:
     assert response.json()["error"]["code"] == "PERMISSION_DENIED"
 
 
-def test_low_confidence_pre_analysis_requires_review(client_and_session, monkeypatch) -> None:
+def test_low_confidence_pre_analysis_completes_with_warnings(client_and_session, monkeypatch) -> None:
     client, session_factory = client_and_session
     user_id, headers = _create_user(session_factory)
     _grant_required_consents(session_factory, user_id)
@@ -252,15 +252,15 @@ def test_low_confidence_pre_analysis_requires_review(client_and_session, monkeyp
     try:
         actor = db.get(User, user_id)
         result = run_pre_analysis_job(db, pre_analysis_id=pre_analysis_id, actor=actor)
-        assert result["status"] == "requires_review"
+        assert result["status"] == "completed"
     finally:
         db.close()
 
     fetched = client.get(f"/api/v1/cases/{case_id}/pre-analysis", headers=headers)
     assert fetched.status_code == 200
-    assert fetched.json()["status"] == "requires_review"
+    assert fetched.json()["status"] == "completed"
     assert fetched.json()["trafficLight"] == "gray"
-    assert fetched.json()["cta"]["type"] == "wait_review"
+    assert fetched.json()["cta"]["type"] == "unlock_full_analysis"
     assert fetched.json()["reviewGuidance"]["reasonCode"] == "low_confidence"
     assert fetched.json()["reviewGuidance"]["confidenceThreshold"] == 0.7
     assert {item["code"] for item in fetched.json()["reviewGuidance"]["actions"]} >= {
@@ -270,8 +270,50 @@ def test_low_confidence_pre_analysis_requires_review(client_and_session, monkeyp
     }
     assert {warning["code"] for warning in fetched.json()["warnings"]} >= {
         "PRELIMINARY_ONLY",
+        "INCOMPLETE_INFORMATION",
         "LOW_CONFIDENCE_REVIEW",
     }
+
+
+def test_pre_analysis_with_incomplete_inputs_completes_and_keeps_contract(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+
+    created = client.post(f"/api/v1/cases/{case_id}/pre-analysis", json={}, headers=headers)
+    assert created.status_code == 202
+    pre_analysis_id = created.json()["preAnalysisId"]
+
+    db = session_factory()
+    try:
+        actor = db.get(User, user_id)
+        result = run_pre_analysis_job(db, pre_analysis_id=pre_analysis_id, actor=actor)
+        assert result["status"] == "completed"
+    finally:
+        db.close()
+
+    fetched = client.get(f"/api/v1/cases/{case_id}/pre-analysis", headers=headers)
+    assert fetched.status_code == 200
+    data = fetched.json()
+    assert data["status"] == "completed"
+    assert data["missingDocuments"]
+    assert data["missingDocuments"][0]["documentType"] == "historia_laboral"
+    assert data["confidence"] <= 0.7
+    assert {warning["code"] for warning in data["warnings"]} >= {
+        "PRELIMINARY_ONLY",
+        "MISSING_SUPPORTING_DOCUMENTS",
+        "INCOMPLETE_INFORMATION",
+        "LOW_CONFIDENCE_REVIEW",
+    }
+    assert "id" in data
+    assert "caseId" in data
+    assert "valueDetected" in data
+    assert "issues" in data
+    assert "cta" in data
+    assert "warnings" in data
+    assert "createdAt" in data
+    assert "completedAt" in data
 
 
 def _create_user(session_factory, *, role: str = "user"):
