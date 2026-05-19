@@ -755,17 +755,6 @@ class CaseService:
             actor=user,
             metadata={"source": payload.source, "tags": normalized_tags},
         )
-        previous_status = case.status
-        if payload.confidence < 0.6 and case.status != "requires_review":
-            self._transition_case(
-                case,
-                new_status="requires_review",
-                reason="Low confidence AI suggestion.",
-                actor=user,
-                source_module="preanalysis",
-                metadata={"confidence": payload.confidence, "source": payload.source},
-                validate_transition=True,
-            )
         self._audit(
             "expediente.updated",
             actor=user,
@@ -777,15 +766,6 @@ class CaseService:
             user_agent=user_agent,
             metadata={"aiSuggestionSource": payload.source},
         )
-        if previous_status != case.status:
-            self._audit_status_changed(
-                actor=user,
-                case=case,
-                previous_status=previous_status,
-                source_module="preanalysis",
-                ip_address=ip_address,
-                user_agent=user_agent,
-            )
         self.db.commit()
         self.db.refresh(case)
         return {
