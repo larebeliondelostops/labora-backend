@@ -164,6 +164,27 @@ class DocumentRepository:
             .first()
         )
 
+    def find_duplicate_by_document_hash(
+        self,
+        *,
+        hash_type: str,
+        hash_value: str,
+        exclude_document_id: uuid.UUID,
+    ) -> Document | None:
+        return (
+            self.db.query(Document)
+            .join(DocumentHash, DocumentHash.document_id == Document.id)
+            .filter(
+                DocumentHash.hash_type == hash_type,
+                DocumentHash.hash_value == hash_value,
+                Document.id != exclude_document_id,
+                Document.deleted_at.is_(None),
+                Document.status.notin_(["deleted", "failed"]),
+            )
+            .order_by(asc(Document.created_at))
+            .first()
+        )
+
     def upsert_hash(
         self,
         *,

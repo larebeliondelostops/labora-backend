@@ -1,8 +1,10 @@
+import hashlib
 import re
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from app.models.case import LaboraCase
 from app.models.document import Document
 from app.models.user import User
 from app.repositories.document_repository import DocumentRepository
@@ -60,6 +62,15 @@ class DocumentValidationService:
             hash_type="sha256",
             hash_value=sha256_hash,
         )
+        duplicate_scope_hash = _duplicate_scope_hash(
+            content_hash=sha256_hash,
+            case=self.db.get(LaboraCase, document.case_id),
+        )
+        self.documents.upsert_hash(
+            document_id=document.id,
+            hash_type="duplicate_scope",
+            hash_value=duplicate_scope_hash,
+        )
 
         checks, warnings, errors, pages, page_count = self._inspect_content(
             document=document,
@@ -70,8 +81,9 @@ class DocumentValidationService:
         document.is_corrupted = bool(checks["isCorrupted"])
         self.documents.replace_pages(document_id=document.id, pages=pages)
 
-        duplicate = self.documents.find_duplicate_by_hash(
-            sha256_hash=sha256_hash,
+        duplicate = self.documents.find_duplicate_by_document_hash(
+            hash_type="duplicate_scope",
+            hash_value=duplicate_scope_hash,
             exclude_document_id=document.id,
         )
         if duplicate is not None:
@@ -88,7 +100,10 @@ class DocumentValidationService:
                 "carga_documental.duplicate_detected",
                 actor=actor,
                 document=document,
-                metadata={"sameCase": duplicate.case_id == document.case_id},
+                metadata={
+                    "sameCase": duplicate.case_id == document.case_id,
+                    "scope": "holder_name_document_number",
+                },
                 ip_address=ip_address,
                 user_agent=user_agent,
             )
@@ -297,6 +312,38 @@ def _looks_like_labor_history(filename: str, text_sample: str) -> bool:
             "colpensiones",
         ]
     )
+
+
+def _duplicate_scope_hash(*, content_hash: str, case: LaboraCase | None) -> str:
+    if case is None:
+        raw_scope = f"sha256:{content_hash}"
+    else:
+        holder_name = _normalize_duplicate_scope_value(
+            f"{case.holder_first_name} {case.holder_last_name}",
+        )
+        holder_document_type = _normalize_duplicate_scope_value(
+            case.holder_document_type,
+        )
+        holder_document_number = _normalize_document_number(
+            case.holder_document_number,
+        )
+        raw_scope = "|".join(
+            [
+                f"sha256:{content_hash}",
+                f"name:{holder_name}",
+                f"documentType:{holder_document_type}",
+                f"documentNumber:{holder_document_number}",
+            ]
+        )
+    return hashlib.sha256(raw_scope.encode("utf-8")).hexdigest()
+
+
+def _normalize_duplicate_scope_value(value: str | None) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+def _normalize_document_number(value: str | None) -> str:
+    return "".join(character for character in (value or "") if character.isalnum()).upper()
 
 
 def _error(code: str, message: str) -> dict:

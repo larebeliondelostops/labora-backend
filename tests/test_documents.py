@@ -177,7 +177,13 @@ def test_document_types_and_multipart_upload_flow(client_and_session) -> None:
     try:
         document = db.get(Document, UUID(document_id))
         assert document.sha256_hash is not None
-        assert db.query(DocumentHash).filter(DocumentHash.document_id == document.id).count() == 1
+        hash_types = {
+            item.hash_type
+            for item in db.query(DocumentHash).filter(
+                DocumentHash.document_id == document.id,
+            )
+        }
+        assert hash_types == {"sha256", "duplicate_scope"}
         event_types = {event.event_type for event in db.query(AuditEvent).all()}
         assert "carga_documental.created" in event_types
         assert "carga_documental.validation_completed" in event_types
@@ -348,6 +354,58 @@ def test_document_validations_duplicates_update_replace_and_delete(client_and_se
     assert replacement.status_code == 200
     assert replacement.json()["oldStatus"] == "replaced"
     assert replacement.json()["newStatus"] == "uploading"
+
+
+def test_same_file_for_different_holder_is_not_duplicate(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    first_case_id = _create_case_row(
+        session_factory,
+        user_id,
+        holder_first_name="Ana",
+        holder_last_name="Gomez",
+        holder_document_number="10101010",
+    )
+    second_case_id = _create_case_row(
+        session_factory,
+        user_id,
+        holder_first_name="Luis",
+        holder_last_name="Perez",
+        holder_document_number="20202020",
+    )
+
+    first = _upload_pdf(
+        client,
+        headers,
+        first_case_id,
+        filename="historia-laboral.pdf",
+        document_type_code="historia_laboral",
+        is_primary=True,
+        content=_labor_history_pdf(),
+    )
+    second = _upload_pdf(
+        client,
+        headers,
+        second_case_id,
+        filename="historia-laboral.pdf",
+        document_type_code="historia_laboral",
+        is_primary=True,
+        content=_labor_history_pdf(),
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["document"]["status"] == "validated"
+    assert second.json()["document"]["status"] == "validated"
+
+    db = session_factory()
+    try:
+        second_document = db.get(Document, UUID(second.json()["document"]["id"]))
+        assert second_document.is_duplicate is False
+        assert second_document.duplicate_of_document_id is None
+    finally:
+        db.close()
 
 
 def test_upload_rejects_bad_type_size_and_corrupted_content(client_and_session) -> None:
@@ -651,7 +709,14 @@ def _create_case(client: TestClient, headers: dict[str, str]) -> str:
     return response.json()["id"]
 
 
-def _create_case_row(session_factory, user_id: UUID) -> str:
+def _create_case_row(
+    session_factory,
+    user_id: UUID,
+    *,
+    holder_first_name: str = "Ana",
+    holder_last_name: str = "Gomez",
+    holder_document_number: str = "10101010",
+) -> str:
     db = session_factory()
     now = utc_now()
     try:
@@ -659,10 +724,10 @@ def _create_case_row(session_factory, user_id: UUID) -> str:
             case_number=f"CASO-2026-{uuid4().hex[:6]}",
             owner_user_id=user_id,
             holder_type="self",
-            holder_first_name="Ana",
-            holder_last_name="Gomez",
+            holder_first_name=holder_first_name,
+            holder_last_name=holder_last_name,
             holder_document_type="CC",
-            holder_document_number="10101010",
+            holder_document_number=holder_document_number,
             holder_email="ana@example.com",
             holder_phone="+573001112233",
             acting_as_third_party=False,
