@@ -48,17 +48,27 @@ class AccountAuthService:
             raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
                 code="EMAIL_ALREADY_EXISTS",
-                message="El correo ya esta registrado.",
+                message="El correo ya esta registrado. Inicia sesion para continuar.",
+                details=[
+                    {
+                        "field": "email",
+                        "message": "Ya existe una cuenta asociada a este correo.",
+                        "nextStep": "login",
+                        "redirectTo": "/auth/login",
+                    }
+                ],
             )
         if self.users.get_by_document(payload.document_type, payload.document_number):
             raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
                 code="DOCUMENT_ALREADY_EXISTS",
-                message="El documento ya esta registrado.",
+                message="El documento ya esta registrado. Inicia sesion para continuar.",
                 details=[
                     {
                         "field": "documentNumber",
                         "message": "Ya existe una cuenta asociada a este documento.",
+                        "nextStep": "login",
+                        "redirectTo": "/auth/login",
                     }
                 ],
             )
@@ -99,11 +109,34 @@ class AccountAuthService:
         user_agent: str | None,
     ) -> dict[str, Any]:
         user = self.users.get_by_email(email)
-        if user is None or not user.password_hash or not verify_password(password, user.password_hash):
+        if user is None:
             self._audit(
                 "auth.login.failed",
                 entity_type="user",
-                metadata={"email": email.lower()},
+                metadata={"email": email.lower(), "reason": "user_not_registered"},
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            self.db.commit()
+            raise ApiError(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="USER_NOT_REGISTERED",
+                message="No encontramos una cuenta con ese correo. Registrate para continuar.",
+                details=[
+                    {
+                        "field": "email",
+                        "message": "No existe una cuenta asociada a este correo.",
+                        "nextStep": "register",
+                        "redirectTo": "/registro",
+                    }
+                ],
+            )
+
+        if not user.password_hash or not verify_password(password, user.password_hash):
+            self._audit(
+                "auth.login.failed",
+                entity_type="user",
+                metadata={"email": email.lower(), "reason": "invalid_credentials"},
                 ip_address=ip_address,
                 user_agent=user_agent,
             )

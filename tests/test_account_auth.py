@@ -15,6 +15,7 @@ from app.core.security import (
 )
 from app.main import app
 from app.repositories.user_repository import UserRepository
+from app.schemas.auth import UserRegisterRequest
 from app.schemas.user import UserProfileUpdate
 from app.services.account_auth_service import AccountAuthService
 
@@ -194,7 +195,8 @@ def test_register_duplicate_email_error(monkeypatch) -> None:
         raise ApiError(
             status_code=409,
             code="EMAIL_ALREADY_EXISTS",
-            message="El correo ya esta registrado.",
+            message="El correo ya esta registrado. Inicia sesion para continuar.",
+            details=[{"nextStep": "login", "redirectTo": "/auth/login"}],
         )
 
     monkeypatch.setattr(AccountAuthService, "register", fake_register)
@@ -213,6 +215,84 @@ def test_register_duplicate_email_error(monkeypatch) -> None:
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "EMAIL_ALREADY_EXISTS"
+    assert response.json()["error"]["details"][0]["nextStep"] == "login"
+
+
+def test_register_existing_email_points_front_to_login() -> None:
+    class FakeUsers:
+        def get_by_email(self, email):
+            assert email == "ana@example.com"
+            return object()
+
+    class FakeDb:
+        pass
+
+    payload = UserRegisterRequest.model_validate(
+        {
+            "firstName": "Ana",
+            "lastName": "Gomez",
+            "documentType": "CC",
+            "documentNumber": "1020304050",
+            "email": "ana@example.com",
+            "password": "Password123*",
+        }
+    )
+    service = AccountAuthService(FakeDb())
+    service.users = FakeUsers()
+
+    try:
+        service.register(payload, ip_address=None, user_agent=None)
+    except ApiError as exc:
+        assert exc.status_code == 409
+        assert exc.code == "EMAIL_ALREADY_EXISTS"
+        assert exc.details[0]["nextStep"] == "login"
+        assert exc.details[0]["redirectTo"] == "/auth/login"
+    else:
+        raise AssertionError("Existing email should point the frontend to login")
+
+
+def test_login_unregistered_email_points_front_to_register() -> None:
+    class FakeUsers:
+        def get_by_email(self, email):
+            assert email == "nadie@example.com"
+            return None
+
+    class FakeAuditEvents:
+        def __init__(self):
+            self.events = []
+
+        def create(self, **kwargs):
+            self.events.append(kwargs)
+
+    class FakeDb:
+        def __init__(self):
+            self.commits = 0
+
+        def commit(self):
+            self.commits += 1
+
+    db = FakeDb()
+    audit_events = FakeAuditEvents()
+    service = AccountAuthService(db)
+    service.users = FakeUsers()
+    service.audit_events = audit_events
+
+    try:
+        service.login(
+            email="nadie@example.com",
+            password="Password123*",
+            ip_address=None,
+            user_agent=None,
+        )
+    except ApiError as exc:
+        assert exc.status_code == 404
+        assert exc.code == "USER_NOT_REGISTERED"
+        assert exc.details[0]["nextStep"] == "register"
+        assert exc.details[0]["redirectTo"] == "/registro"
+        assert audit_events.events[0]["metadata"]["reason"] == "user_not_registered"
+        assert db.commits == 1
+    else:
+        raise AssertionError("Unregistered email should point the frontend to register")
 
 
 def test_login_endpoint_sets_cookie(monkeypatch) -> None:
