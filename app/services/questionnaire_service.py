@@ -61,7 +61,12 @@ class QuestionnaireService:
         self._require_can_view(case, user, ip_address, user_agent)
         self._require_sensitive_consent(user)
         template = ensure_guided_case_template(self.db)
-        session = self._get_or_create_session(case=case, template=template, user=user)
+        session = self._get_or_create_session(
+            case=case,
+            template=template,
+            user=user,
+            lock_for_update=True,
+        )
         self._prefill_answers(case=case, session=session, user=user)
         payload = self._questionnaire_payload(case=case, session=session, template=template)
         self._audit(
@@ -96,7 +101,12 @@ class QuestionnaireService:
                 code="QUESTIONNAIRE_TEMPLATE_NOT_FOUND",
                 message="Plantilla de cuestionario no encontrada.",
             )
-        session = self._get_or_create_session(case=case, template=template, user=user)
+        session = self._get_or_create_session(
+            case=case,
+            template=template,
+            user=user,
+            lock_for_update=True,
+        )
         if session.status == "not_started":
             session.status = "in_progress"
         if session.started_at is None:
@@ -130,7 +140,12 @@ class QuestionnaireService:
         self._require_sensitive_consent(user)
         self._require_case_allows_writes(case, user)
         template = ensure_guided_case_template(self.db)
-        session = self._get_or_create_session(case=case, template=template, user=user)
+        session = self._get_or_create_session(
+            case=case,
+            template=template,
+            user=user,
+            lock_for_update=True,
+        )
         self._assert_session_matches(payload.session_id, session)
 
         before_visible, _before_required, _before_flag = self._visible_state(
@@ -222,7 +237,8 @@ class QuestionnaireService:
         self._require_can_update(case, user, ip_address, user_agent)
         self._require_sensitive_consent(user)
         self._require_case_allows_writes(case, user)
-        session = answer.session
+        session = self._lock_session(answer.session)
+        self.db.refresh(answer)
         template = session.template
         normalized = self._validate_answer(answer.question, payload.value)
         updated_answer = self._upsert_answer(
@@ -267,7 +283,12 @@ class QuestionnaireService:
             raise self._invalid_answer("confirmAccuracy", "Debes confirmar la veracidad de la informacion.")
 
         template = ensure_guided_case_template(self.db)
-        session = self._get_or_create_session(case=case, template=template, user=user)
+        session = self._get_or_create_session(
+            case=case,
+            template=template,
+            user=user,
+            lock_for_update=True,
+        )
         self._assert_session_matches(payload.session_id, session)
         missing = self._missing_required_answers(case=case, session=session, template=template)
         if missing:
@@ -405,7 +426,12 @@ class QuestionnaireService:
         self._require_internal_role(user)
         case = self._get_case_or_404(case_id)
         template = ensure_guided_case_template(self.db)
-        session = self._get_or_create_session(case=case, template=template, user=user)
+        session = self._get_or_create_session(
+            case=case,
+            template=template,
+            user=user,
+            lock_for_update=True,
+        )
         profile = self._recompute_session(case=case, session=session, template=template)
         self._audit(
             f"{QUESTIONNAIRE_AUDIT_PREFIX}.profile_recomputed",
@@ -425,10 +451,24 @@ class QuestionnaireService:
         case: LaboraCase,
         template: QuestionnaireTemplate,
         user: User,
+        lock_for_update: bool = False,
     ) -> CaseQuestionnaireSession:
-        session = self._get_latest_session(case=case, template=template)
+        session = self._get_latest_session(
+            case=case,
+            template=template,
+            lock_for_update=lock_for_update,
+        )
         if session is not None:
             return session
+        if lock_for_update:
+            self._lock_case(case)
+            session = self._get_latest_session(
+                case=case,
+                template=template,
+                lock_for_update=True,
+            )
+            if session is not None:
+                return session
         session = CaseQuestionnaireSession(
             case_id=case.id,
             template_id=template.id,
@@ -446,15 +486,27 @@ class QuestionnaireService:
         *,
         case: LaboraCase,
         template: QuestionnaireTemplate,
+        lock_for_update: bool = False,
     ) -> CaseQuestionnaireSession | None:
+        query = self.db.query(CaseQuestionnaireSession).filter(
+            CaseQuestionnaireSession.case_id == case.id,
+            CaseQuestionnaireSession.template_id == template.id,
+        )
+        if lock_for_update:
+            # Autosave bursts for one questionnaire must serialize so answer/profile
+            # upserts see the rows committed by the previous request.
+            query = query.with_for_update()
+        return query.order_by(CaseQuestionnaireSession.created_at.desc()).first()
+
+    def _lock_case(self, case: LaboraCase) -> None:
+        self.db.query(LaboraCase.id).filter(LaboraCase.id == case.id).with_for_update().one()
+
+    def _lock_session(self, session: CaseQuestionnaireSession) -> CaseQuestionnaireSession:
         return (
             self.db.query(CaseQuestionnaireSession)
-            .filter(
-                CaseQuestionnaireSession.case_id == case.id,
-                CaseQuestionnaireSession.template_id == template.id,
-            )
-            .order_by(CaseQuestionnaireSession.created_at.desc())
-            .first()
+            .filter(CaseQuestionnaireSession.id == session.id)
+            .with_for_update()
+            .one()
         )
 
     def _prefill_answers(

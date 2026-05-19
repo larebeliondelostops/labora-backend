@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import app.models  # noqa: F401
@@ -41,6 +42,7 @@ from app.services.consent_service import (
     REQUIRED_CONSENT_TYPES,
     calculate_document_hash,
 )
+from app.services.questionnaire_service import QuestionnaireService
 from app.utils.dates import utc_now
 
 
@@ -261,6 +263,45 @@ def test_foreign_user_cannot_access_questionnaire(client_and_session) -> None:
     assert owner_headers != other_headers
 
 
+def test_latest_session_query_can_lock_for_update() -> None:
+    query = _FakeQuery(result=object())
+    service = QuestionnaireService(_FakeDb(query))
+
+    service._get_latest_session(
+        case=SimpleNamespace(id=uuid4()),
+        template=SimpleNamespace(id=uuid4()),
+        lock_for_update=True,
+    )
+
+    assert query.locked_for_update is True
+
+
+def test_get_or_create_session_rechecks_after_locking_case(monkeypatch) -> None:
+    service = QuestionnaireService(_FakeDb(_FakeQuery(result=None)))
+    existing_session = object()
+    calls = {"latest": 0, "case_locked": False}
+
+    def fake_get_latest_session(**_kwargs):
+        calls["latest"] += 1
+        return None if calls["latest"] == 1 else existing_session
+
+    def fake_lock_case(_case):
+        calls["case_locked"] = True
+
+    monkeypatch.setattr(service, "_get_latest_session", fake_get_latest_session)
+    monkeypatch.setattr(service, "_lock_case", fake_lock_case)
+
+    session = service._get_or_create_session(
+        case=SimpleNamespace(id=uuid4()),
+        template=SimpleNamespace(id=uuid4(), code="guided_case_v1"),
+        user=SimpleNamespace(id=uuid4()),
+        lock_for_update=True,
+    )
+
+    assert session is existing_session
+    assert calls == {"latest": 2, "case_locked": True}
+
+
 def _save_normal_answers(client: TestClient, headers: dict[str, str], case_id: str, session_id: str) -> None:
     response = client.post(
         f"/api/v1/cases/{case_id}/questionnaire/answers",
@@ -288,6 +329,36 @@ def _answer_id(questionnaire: dict, question_code: str) -> str:
             if question["code"] == question_code:
                 return question["answer"]["id"]
     raise AssertionError(f"No answer for {question_code}")
+
+
+class _FakeDb:
+    def __init__(self, query: "_FakeQuery") -> None:
+        self.query_object = query
+
+    def query(self, *_args):
+        return self.query_object
+
+    def add(self, _obj) -> None:
+        raise AssertionError("Expected existing concurrent session to be reused.")
+
+
+class _FakeQuery:
+    def __init__(self, *, result) -> None:
+        self.result = result
+        self.locked_for_update = False
+
+    def filter(self, *_args):
+        return self
+
+    def with_for_update(self):
+        self.locked_for_update = True
+        return self
+
+    def order_by(self, *_args):
+        return self
+
+    def first(self):
+        return self.result
 
 
 def _create_user(session_factory, *, role: str = "user"):
