@@ -258,7 +258,9 @@ class PaymentService:
         case = self._get_case_or_404(order.case_id)
         self._require_can_view(case, user, ip_address, user_agent)
         self._require_order_access(order, user)
+        self._require_case_can_checkout(case)
         self._require_order_can_checkout(order, allow_retry=allow_retry)
+        self._require_order_product_can_checkout(order)
         if reuse_existing:
             existing_payment = self.payments.pending_payment_for_order(order.id)
             if existing_payment is not None:
@@ -1339,7 +1341,11 @@ class PaymentService:
                 code="ORDER_ALREADY_PAID",
                 message="La orden ya fue pagada.",
             )
-        blocked_statuses = ORDER_CANCELLED_STATUSES - {"failed"} if allow_retry else ORDER_CANCELLED_STATUSES
+        blocked_statuses = (
+            ORDER_CANCELLED_STATUSES - {"failed", "requires_review"}
+            if allow_retry
+            else ORDER_CANCELLED_STATUSES - {"requires_review"}
+        )
         if order.status in blocked_statuses:
             raise ApiError(
                 status_code=status.HTTP_409_CONFLICT,
@@ -1354,6 +1360,28 @@ class PaymentService:
                 status_code=status.HTTP_409_CONFLICT,
                 code="ORDER_EXPIRED",
                 message="La orden esta vencida.",
+            )
+
+    def _require_case_can_checkout(self, case: LaboraCase) -> None:
+        if self._case_is_unlocked(case):
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code="CASE_ALREADY_UNLOCKED",
+                message="El analisis completo ya esta desbloqueado.",
+            )
+
+    def _require_order_product_can_checkout(self, order: Order) -> None:
+        if order.product_code != PRODUCT_CODE:
+            raise ApiError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="PRODUCT_NOT_AVAILABLE",
+                message="El producto de la orden no esta disponible para checkout.",
+            )
+        if order.total_amount <= 0 or (order.currency or "").strip().upper() != self._currency():
+            raise ApiError(
+                status_code=status.HTTP_409_CONFLICT,
+                code="ORDER_NOT_PAYABLE",
+                message="La orden no tiene un monto o moneda validos para checkout.",
             )
 
     def _payment_amount_matches(self, order: Order, provider_event: ProviderPaymentEvent) -> bool:

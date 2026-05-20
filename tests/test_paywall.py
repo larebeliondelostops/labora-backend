@@ -100,7 +100,7 @@ def test_owner_can_generate_view_checkout_and_track_paywall(client_and_session) 
         headers=headers,
     )
     assert checkout.status_code == 201
-    assert checkout.json()["checkoutUrl"].startswith("http://localhost:3000/app/cases/")
+    assert checkout.json()["checkoutUrl"].startswith("https://new-checkout.epayco.co/checkout/")
 
     db = session_factory()
     try:
@@ -239,7 +239,7 @@ def test_low_confidence_preview_allows_checkout_and_admin_can_approve(client_and
         headers=headers,
     )
     assert checkout.status_code == 201
-    assert checkout.json()["checkoutUrl"].startswith("http://localhost:3000/app/cases/")
+    assert checkout.json()["checkoutUrl"].startswith("https://new-checkout.epayco.co/checkout/")
 
     listed = client.get("/api/v1/admin/paywall-previews?status=requires_review", headers=admin_headers)
     assert listed.status_code == 200
@@ -283,6 +283,23 @@ def test_payment_checkout_allows_preview_requires_review_and_reuses_pending_paym
     assert order_response.status_code == 201
     order = order_response.json()["order"]
 
+    case_checkout = client.post(
+        f"/api/v1/cases/{case_id}/checkout/session",
+        json={"source": "payment_flow"},
+        headers=headers,
+    )
+    assert case_checkout.status_code == 201
+    assert case_checkout.json()["checkoutUrl"].startswith("https://new-checkout.epayco.co/checkout/")
+    assert "requiere revision interna" not in case_checkout.text.lower()
+
+    db = session_factory()
+    try:
+        stored_order = db.get(Order, UUID(order["id"]))
+        stored_order.status = "requires_review"
+        db.commit()
+    finally:
+        db.close()
+
     checkout_payload = {
         "orderId": order["id"],
         "paymentMethod": "CARD",
@@ -298,7 +315,8 @@ def test_payment_checkout_allows_preview_requires_review_and_reuses_pending_paym
     assert checkout.status_code == 201
     payment = checkout.json()["payment"]
     assert payment["status"] == "checkout_started"
-    assert payment["checkoutUrl"].startswith("http://localhost:3000/app/cases/")
+    assert payment["checkoutUrl"].startswith("https://new-checkout.epayco.co/checkout/")
+    assert "requiere revision interna" not in checkout.text.lower()
 
     resumed_checkout = client.post("/api/v1/payments/checkout", json=checkout_payload, headers=headers)
     assert resumed_checkout.status_code == 201
@@ -352,6 +370,7 @@ def test_checkout_uses_epayco_apify_when_configured(client_and_session, monkeypa
     data = checkout.json()
     assert data["provider"] == "epayco"
     assert data["checkoutSessionId"] == "epayco-session-123"
+    assert data["checkoutUrl"] == "https://new-checkout.epayco.co/checkout/epayco-session-123"
     assert data["providerSessionToken"] == "epayco-session-token"
     assert calls[0]["url"].endswith("/login")
     assert calls[1]["url"].endswith("/payment/session/create")
@@ -470,7 +489,7 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
     assert checkout.status_code == 201
     payment = checkout.json()["payment"]
     assert payment["status"] == "checkout_started"
-    assert payment["checkoutUrl"].startswith("http://localhost:3000/app/cases/")
+    assert payment["checkoutUrl"].startswith("https://new-checkout.epayco.co/checkout/")
 
     repeated_checkout = client.post(
         "/api/v1/payments/checkout",

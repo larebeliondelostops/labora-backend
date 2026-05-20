@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -32,6 +33,9 @@ class EpaycoProviderError(Exception):
         self.code = code
 
 
+EPAYCO_CHECKOUT_BASE_URL = "https://new-checkout.epayco.co"
+
+
 class EpaycoCheckoutClient:
     def is_configured(self) -> bool:
         return bool(settings.epayco_public_key and settings.epayco_private_key)
@@ -47,7 +51,6 @@ class EpaycoCheckoutClient:
     ) -> EpaycoCheckoutSession:
         invoice = epayco_invoice_for_paywall(paywall.id)
         response_url = return_url or f"{settings.frontend_url}/app/cases/{case.id}/preview?payment=return"
-        checkout_url = f"{settings.frontend_url}/app/cases/{case.id}/checkout?provider=epayco"
         expires_at = utc_now() + timedelta(hours=1)
         payload = self._payload(
             case=case,
@@ -58,10 +61,11 @@ class EpaycoCheckoutClient:
             confirmation_url=confirmation_url or settings.epayco_confirmation_url,
         )
         if not self.is_configured():
+            session_id = str(uuid.uuid4())
             return EpaycoCheckoutSession(
-                session_id=str(uuid.uuid4()),
+                session_id=session_id,
                 provider_session_token=None,
-                checkout_url=checkout_url,
+                checkout_url=epayco_checkout_url_for_session(session_id),
                 expires_at=expires_at,
                 invoice=invoice,
                 provider_payload=payload,
@@ -81,7 +85,7 @@ class EpaycoCheckoutClient:
         return EpaycoCheckoutSession(
             session_id=str(session_id),
             provider_session_token=session_data.get("token"),
-            checkout_url=checkout_url,
+            checkout_url=_checkout_url_from_response(data, str(session_id)),
             expires_at=expires_at,
             invoice=invoice,
             provider_payload=payload,
@@ -211,6 +215,38 @@ def _checkout_amount(value: Decimal | None) -> float:
             code="EPAYCO_INVALID_AMOUNT",
         )
     return float(amount)
+
+
+def epayco_checkout_url_for_session(session_id: str, checkout_type: str | None = None) -> str:
+    path = "checkout-standard" if (checkout_type or settings.epayco_checkout_type) == "standard" else "checkout"
+    return f"{EPAYCO_CHECKOUT_BASE_URL}/{path}/{quote(str(session_id), safe='')}"
+
+
+def _checkout_url_from_response(response: dict[str, Any], session_id: str) -> str:
+    session_data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    for source in (session_data, response):
+        checkout_url = _first_http_url(
+            source,
+            "checkoutUrl",
+            "checkout_url",
+            "redirectUrl",
+            "redirect_url",
+            "paymentUrl",
+            "payment_url",
+            "url",
+            "link",
+        )
+        if checkout_url:
+            return checkout_url
+    return epayco_checkout_url_for_session(session_id)
+
+
+def _first_http_url(source: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, str) and value.lower().startswith(("http://", "https://")):
+            return value
+    return None
 
 
 def epayco_invoice_for_paywall(paywall_id: uuid.UUID) -> str:
