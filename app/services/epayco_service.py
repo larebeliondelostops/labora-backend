@@ -48,8 +48,9 @@ class EpaycoCheckoutClient:
         paywall: Paywall,
         return_url: str | None,
         confirmation_url: str | None = None,
+        invoice: str | None = None,
     ) -> EpaycoCheckoutSession:
-        invoice = epayco_invoice_for_paywall(paywall.id)
+        invoice = invoice or epayco_invoice_for_paywall(paywall.id)
         response_url = epayco_response_url_for_case(case.id, return_url)
         expires_at = utc_now() + timedelta(hours=1)
         payload = self._payload(
@@ -223,10 +224,7 @@ def epayco_checkout_url_for_session(session_id: str, checkout_type: str | None =
 
 
 def epayco_response_url_for_case(case_id: uuid.UUID, return_url: str | None = None) -> str:
-    normalized = return_url.strip() if return_url else None
-    if normalized and not _is_pre_payment_return_url(normalized):
-        return normalized
-    frontend_base_url = _frontend_base_url_from_return_url(normalized) or settings.frontend_url
+    frontend_base_url = settings.epayco_response_frontend_url
     return f"{frontend_base_url}/app/cases/{case_id}/payment/return?provider=epayco"
 
 
@@ -272,8 +270,13 @@ def _first_http_url(source: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def epayco_invoice_for_paywall(paywall_id: uuid.UUID) -> str:
-    return f"LABORA-{paywall_id.hex}"
+def epayco_invoice_for_paywall(paywall_id: uuid.UUID, attempt_reference: str | None = None) -> str:
+    if not attempt_reference:
+        return f"LABORA-{paywall_id.hex}"
+    safe_reference = "".join(
+        char for char in str(attempt_reference).strip() if char.isalnum()
+    )[:16]
+    return f"LABORA-{paywall_id.hex}-{safe_reference}" if safe_reference else f"LABORA-{paywall_id.hex}"
 
 
 def paywall_id_from_epayco_invoice(invoice: str | None) -> uuid.UUID | None:
@@ -282,6 +285,7 @@ def paywall_id_from_epayco_invoice(invoice: str | None) -> uuid.UUID | None:
     normalized = str(invoice).strip()
     if normalized.upper().startswith("LABORA-"):
         normalized = normalized.split("-", 1)[1]
+    normalized = normalized.split("-", 1)[0]
     try:
         return uuid.UUID(hex=normalized)
     except (TypeError, ValueError):

@@ -27,6 +27,7 @@ from app.services.epayco_service import (
     EpaycoCheckoutClient,
     EpaycoProviderError,
     epayco_confirmation_signature,
+    epayco_invoice_for_paywall,
     epayco_response_url_for_case,
     paywall_id_from_epayco_invoice,
 )
@@ -269,9 +270,42 @@ class PaymentService:
                     existing_payment.status = "expired"
                     existing_payment.provider_status = existing_payment.provider_status or "checkout_expired"
                     existing_payment.updated_at = utc_now()
-                elif existing_payment.checkout_url:
+                    order.status = "expired"
+                    order.updated_at = utc_now()
+                    if not allow_retry:
+                        self._set_case_status(
+                            case,
+                            new_status="payment_expired",
+                            reason="El checkout de pago expiro.",
+                            source_module="payments",
+                            metadata={"orderId": str(order.id), "paymentId": str(existing_payment.id)},
+                        )
+                        self.db.commit()
+                        raise ApiError(
+                            status_code=status.HTTP_409_CONFLICT,
+                            code="PAYMENT_EXPIRED_RETRY_REQUIRED",
+                            message="El intento de pago expiro. Solicita un retry para crear una nueva referencia de ePayco.",
+                            details={
+                                "caseId": str(case.id),
+                                "orderId": str(order.id),
+                                "paymentId": str(existing_payment.id),
+                                "paymentStatus": existing_payment.status,
+                            },
+                        )
+                else:
+                    self._ensure_pending_case_status(case=case, order=order, payment=existing_payment)
                     self.db.commit()
-                    return {"payment": self._payment_payload(existing_payment)}
+                    raise ApiError(
+                        status_code=status.HTTP_409_CONFLICT,
+                        code="PAYMENT_ALREADY_PENDING",
+                        message="Ya existe un intento de pago pendiente. Espera la confirmacion de ePayco o usa retry si el pago falla.",
+                        details={
+                            "caseId": str(case.id),
+                            "orderId": str(order.id),
+                            "paymentId": str(existing_payment.id),
+                            "paymentStatus": existing_payment.status,
+                        },
+                    )
 
         paywall = self._paywall_for_order(order)
         self._ensure_paywall_pricing(paywall)
@@ -282,6 +316,7 @@ class PaymentService:
             paywall.price_label = _format_price_label(order.total_amount, order.currency)
             paywall.updated_at = utc_now()
         preview = self._preview_for_paywall(paywall)
+        invoice = epayco_invoice_for_paywall(paywall.id, uuid.uuid4().hex)
         checkout_return_url = epayco_response_url_for_case(
             case.id,
             return_url or (order.metadata_json or {}).get("returnUrl"),
@@ -308,6 +343,7 @@ class PaymentService:
                 paywall=paywall,
                 return_url=checkout_return_url,
                 confirmation_url=self._provider_webhook_url("epayco"),
+                invoice=invoice,
             )
             self._log_trace(
                 event_name="payment.checkout.after_provider_response",
@@ -321,6 +357,7 @@ class PaymentService:
                     "providerCheckoutUrl": checkout_session.checkout_url,
                     "providerPayloadAmount": checkout_session.provider_payload.get("amount"),
                     "providerPayloadCurrency": checkout_session.provider_payload.get("currency"),
+                    "invoice": checkout_session.invoice,
                 },
             )
         except EpaycoProviderError as exc:
@@ -375,6 +412,8 @@ class PaymentService:
             raw_provider_payload={
                 "checkoutPayload": _json_safe(checkout_session.provider_payload),
                 "providerResponse": _json_safe(checkout_session.raw_response),
+                "invoice": checkout_session.invoice,
+                "providerReference": checkout_session.invoice,
                 "customer": _normalized_customer_profile(customer),
                 "customerMasked": _safe_customer_metadata(customer),
             },
@@ -388,7 +427,7 @@ class PaymentService:
         paywall.updated_at = now
         self._set_case_status(
             case,
-            new_status="payment_order_created",
+            new_status="payment_pending",
             reason="Checkout de pago iniciado, en espera de interaccion en pasarela.",
             source_module="payments",
             metadata={"orderId": str(order.id), "paymentId": str(payment.id)},
@@ -527,6 +566,15 @@ class PaymentService:
         payment, order = self._resolve_payment_and_order(
             provider=normalized_provider,
             provider_event=provider_event,
+        )
+        self._log_provider_confirmation(
+            case_id=order.case_id if order else None,
+            order_id=order.id if order else None,
+            payment_id=payment.id if payment else None,
+            provider_reference=provider_event.provider_payment_id,
+            invoice=provider_event.invoice,
+            provider_status=provider_event.provider_status,
+            normalized_status=provider_event.normalized_status,
         )
         transaction = self.payments.create_transaction(
             payment_id=payment.id if payment else None,
@@ -695,11 +743,19 @@ class PaymentService:
         payment = self.payments.latest_payment_for_order(order.id) if order else None
         receipt = self.payments.receipt_for_order(order.id) if order else None
         is_unlocked = self._case_is_unlocked(case)
-        can_pay = (not is_unlocked) and order is not None and order.status not in ORDER_PAID_STATUSES
+        payment_status = payment.status if payment else None
+        has_active_attempt = payment_status in {"created", "checkout_started", "pending"}
+        has_retryable_attempt = payment_status in {"rejected", "failed", "expired", "cancelled"}
+        can_pay = (
+            not is_unlocked
+            and order is not None
+            and order.status == "created"
+            and payment is None
+        )
         can_retry = (
             not is_unlocked
             and order is not None
-            and (payment is None or payment.status in {"rejected", "failed", "expired", "cancelled"})
+            and has_retryable_attempt
         )
         response = {
             "paymentFlow": {
@@ -725,6 +781,7 @@ class PaymentService:
                 "configuredUnlockPriceCop": configured_price,
                 "configuredCurrency": configured_currency,
                 "provisionReason": provision_reason,
+                "hasActiveAttempt": has_active_attempt,
                 "order": self._order_payload(order) if order else None,
             },
         )
@@ -1596,6 +1653,17 @@ class PaymentService:
             metadata=_json_safe(metadata) if metadata else None,
         )
 
+    def _ensure_pending_case_status(self, *, case: LaboraCase, order: Order, payment: Payment) -> None:
+        if self._case_is_unlocked(case) or case.status == "payment_pending":
+            return
+        self._set_case_status(
+            case,
+            new_status="payment_pending",
+            reason="Checkout de pago ya iniciado, en espera de confirmacion.",
+            source_module="payments",
+            metadata={"orderId": str(order.id), "paymentId": str(payment.id)},
+        )
+
     def _case_is_unlocked(self, case: LaboraCase) -> bool:
         return case.status in UNLOCKED_CASE_STATUSES
 
@@ -1815,6 +1883,7 @@ class PaymentService:
         }
 
     def _payment_payload(self, payment: Payment) -> dict[str, Any]:
+        provider_metadata = _provider_metadata_from_payment(payment)
         return {
             "id": str(payment.id),
             "orderId": str(payment.order_id),
@@ -1822,6 +1891,9 @@ class PaymentService:
             "status": payment.status,
             "provider": payment.provider,
             "providerPaymentId": payment.provider_payment_id,
+            "providerReference": provider_metadata.get("providerReference") or payment.provider_payment_id,
+            "refPayco": provider_metadata.get("refPayco") or payment.provider_payment_id,
+            "invoice": provider_metadata.get("invoice"),
             "providerCheckoutId": payment.provider_checkout_id,
             "providerStatus": payment.provider_status,
             "amount": payment.amount,
@@ -1882,10 +1954,16 @@ class PaymentService:
     def _payment_flow_payment(self, payment: Payment | None) -> dict[str, Any] | None:
         if payment is None:
             return None
+        provider_metadata = _provider_metadata_from_payment(payment)
+        checkout_url = None if payment.status in {"created", "checkout_started", "pending"} else payment.checkout_url
         return {
             "id": str(payment.id),
             "status": payment.status,
-            "checkoutUrl": payment.checkout_url,
+            "provider": payment.provider,
+            "providerReference": provider_metadata.get("providerReference") or payment.provider_payment_id,
+            "refPayco": provider_metadata.get("refPayco") or payment.provider_payment_id,
+            "invoice": provider_metadata.get("invoice"),
+            "checkoutUrl": checkout_url,
         }
 
     def _payment_flow_receipt(self, receipt: Receipt | None) -> dict[str, Any] | None:
@@ -1906,9 +1984,9 @@ class PaymentService:
     ) -> str:
         if self._case_is_unlocked(case):
             return "Tu pago fue confirmado y el analisis completo esta desbloqueado."
-        if payment and payment.status == "pending":
+        if payment and payment.status in {"created", "checkout_started", "pending"}:
             return "Tu pago esta en proceso. Te avisaremos cuando sea confirmado."
-        if payment and payment.status in {"rejected", "failed"}:
+        if payment and payment.status in {"rejected", "failed", "expired", "cancelled"}:
             return "Tu pago no fue aprobado. Puedes intentar nuevamente."
         if order is None:
             return "Crea una orden para desbloquear el analisis completo."
@@ -1917,6 +1995,12 @@ class PaymentService:
         return "Puedes continuar con el pago para desbloquear el analisis completo."
 
     def _case_payment_status(self, case: LaboraCase, payment: Payment | None) -> str:
+        if self._case_is_unlocked(case):
+            return "full_analysis_unlocked"
+        if payment is not None:
+            if payment.status in {"created", "checkout_started", "pending"}:
+                return "payment_pending"
+            return f"payment_{payment.status}"
         if case.status in {
             "payment_order_created",
             "payment_pending",
@@ -1928,8 +2012,6 @@ class PaymentService:
             "full_analysis_unlocked",
         }:
             return case.status
-        if payment is not None:
-            return f"payment_{payment.status}"
         if case.status == "preview_locked":
             return "payment_not_started"
         return case.status
@@ -1956,6 +2038,7 @@ class PaymentService:
             "status": payment.status,
             "provider": payment.provider,
             "providerPaymentId": payment.provider_payment_id,
+            "invoice": _provider_metadata_from_payment(payment).get("invoice"),
             "providerCheckoutId": payment.provider_checkout_id,
             "amount": payment.amount,
             "currency": payment.currency,
@@ -2071,6 +2154,53 @@ class PaymentService:
                 sort_keys=True,
             ),
         )
+
+    def _log_provider_confirmation(
+        self,
+        *,
+        case_id: uuid.UUID | None,
+        order_id: uuid.UUID | None,
+        payment_id: uuid.UUID | None,
+        provider_reference: str | None,
+        invoice: str | None,
+        provider_status: str | None,
+        normalized_status: str,
+    ) -> None:
+        logger.info(
+            "payment_provider_confirmation %s",
+            json.dumps(
+                {
+                    "caseId": str(case_id) if case_id else None,
+                    "orderId": str(order_id) if order_id else None,
+                    "paymentId": str(payment_id) if payment_id else None,
+                    "providerReference": provider_reference,
+                    "refPayco": provider_reference,
+                    "invoice": invoice,
+                    "providerStatus": provider_status,
+                    "normalizedStatus": normalized_status,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
+
+
+def _provider_metadata_from_payment(payment: Payment) -> dict[str, Any]:
+    payload = payment.raw_provider_payload if isinstance(payment.raw_provider_payload, dict) else {}
+    checkout_payload = payload.get("checkoutPayload") if isinstance(payload.get("checkoutPayload"), dict) else {}
+    invoice = (
+        payload.get("invoice")
+        or checkout_payload.get("invoice")
+        or payload.get("x_id_invoice")
+        or payload.get("invoice")
+    )
+    ref_payco = payload.get("x_ref_payco") or payload.get("refPayco") or payment.provider_payment_id
+    provider_reference = payload.get("providerReference") or ref_payco or invoice
+    return {
+        "invoice": str(invoice) if invoice else None,
+        "refPayco": str(ref_payco) if ref_payco else None,
+        "providerReference": str(provider_reference) if provider_reference else None,
+    }
 
 
 def _normalize_status(provider_status: str | None, response_code: str | None) -> str:

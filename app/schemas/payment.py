@@ -77,6 +77,9 @@ class PaymentDto(BaseModel):
     status: str
     provider: str
     provider_payment_id: str | None = Field(alias="providerPaymentId", default=None)
+    provider_reference: str | None = Field(alias="providerReference", default=None)
+    ref_payco: str | None = Field(alias="refPayco", default=None)
+    invoice: str | None = None
     provider_checkout_id: str | None = Field(alias="providerCheckoutId", default=None)
     provider_status: str | None = Field(alias="providerStatus", default=None)
     amount: int

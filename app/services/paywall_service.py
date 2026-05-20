@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import re
 import uuid
 from datetime import date, datetime, timezone
@@ -34,6 +35,8 @@ from app.services.epayco_service import (
 )
 from app.utils.dates import utc_now
 
+
+logger = logging.getLogger(__name__)
 
 ADMIN_ROLES = {"admin", "legal_admin"}
 LEGAL_REVIEWER_ROLES = {"legal_reviewer"}
@@ -405,6 +408,31 @@ class PaywallPreviewService:
         response_code = str(payload.get("x_cod_response") or "").strip()
         response_text = str(payload.get("x_response") or "").strip().lower()
         accepted = response_code == "1" or response_text == "aceptada"
+        normalized_status = {
+            "1": "approved",
+            "2": "rejected",
+            "3": "pending",
+            "4": "failed",
+        }.get(response_code, "approved" if accepted else "failed")
+        payment_id = _payment_uuid(payload)
+
+        logger.info(
+            "payment_provider_confirmation %s",
+            json.dumps(
+                {
+                    "caseId": str(case.id),
+                    "orderId": None,
+                    "paymentId": str(payment_id) if payment_id else None,
+                    "providerReference": payload.get("x_ref_payco"),
+                    "refPayco": payload.get("x_ref_payco"),
+                    "invoice": payload.get("x_id_invoice") or payload.get("invoice"),
+                    "providerStatus": payload.get("x_response") or payload.get("x_response_reason_text"),
+                    "normalizedStatus": normalized_status,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
 
         self._record_conversion_event(
             event_name="checkout_returned",

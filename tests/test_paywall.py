@@ -339,8 +339,8 @@ def test_payment_checkout_allows_preview_requires_review_and_reuses_pending_paym
         db.close()
 
     resumed_checkout = client.post("/api/v1/payments/checkout", json=checkout_payload, headers=headers)
-    assert resumed_checkout.status_code == 201
-    assert resumed_checkout.json()["payment"]["id"] == payment["id"]
+    assert resumed_checkout.status_code == 409
+    assert resumed_checkout.json()["error"]["code"] == "PAYMENT_ALREADY_PENDING"
 
 
 def test_checkout_uses_epayco_apify_when_configured(client_and_session, monkeypatch) -> None:
@@ -398,7 +398,7 @@ def test_checkout_uses_epayco_apify_when_configured(client_and_session, monkeypa
     assert calls[1]["json"]["amount"] == 150000.0
     assert calls[1]["json"]["invoice"].startswith("LABORA-")
     assert calls[1]["json"]["response"] == (
-        f"http://localhost:3000/app/cases/{case_id}/payment/return?provider=epayco"
+        f"https://labora.centralspike.com/app/cases/{case_id}/payment/return?provider=epayco"
     )
     assert calls[1]["json"]["confirmation"].endswith("/api/v1/payments/epayco/confirmation")
 
@@ -529,19 +529,31 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
         },
         headers=headers,
     )
-    assert repeated_checkout.status_code == 201
-    assert repeated_checkout.json()["payment"]["id"] == payment["id"]
+    assert repeated_checkout.status_code == 409
+    assert repeated_checkout.json()["error"]["code"] == "PAYMENT_ALREADY_PENDING"
+
+    pending_flow = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
+    assert pending_flow.status_code == 200
+    pending_data = pending_flow.json()["paymentFlow"]
+    assert pending_data["caseStatus"] == "payment_pending"
+    assert pending_data["canPay"] is False
+    assert pending_data["canRetry"] is False
+    assert pending_data["canContinue"] is False
+    assert pending_data["isUnlocked"] is False
+    assert pending_data["payment"]["status"] == "checkout_started"
+    assert pending_data["payment"]["checkoutUrl"] is None
 
     db = session_factory()
     try:
         stored_order = db.get(Order, UUID(order["id"]))
         stored_pending_payment = db.get(Payment, UUID(payment["id"]))
-        invoice = epayco_invoice_for_paywall(stored_order.paywall_id)
+        invoice = stored_pending_payment.raw_provider_payload["checkoutPayload"]["invoice"]
+        assert invoice.startswith(f"{epayco_invoice_for_paywall(stored_order.paywall_id)}-")
         assert stored_pending_payment.raw_provider_payload["checkoutPayload"]["confirmation"].endswith(
             "/api/v1/payments/webhook/epayco"
         )
         assert stored_pending_payment.raw_provider_payload["checkoutPayload"]["response"] == (
-            f"https://labora.centralspike.com/casos/{case_id}/pago/retorno"
+            f"https://labora.centralspike.com/app/cases/{case_id}/payment/return?provider=epayco"
         )
         assert stored_pending_payment.raw_provider_payload["customer"] == {
             "fullName": "Maria Gomez",
@@ -580,6 +592,14 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
     assert status_data["case"]["unlockStatus"] == "full_analysis_unlocked"
     assert status_data["receipt"]["available"] is True
 
+    unlocked_flow = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
+    assert unlocked_flow.status_code == 200
+    unlocked_data = unlocked_flow.json()["paymentFlow"]
+    assert unlocked_data["caseStatus"] == "full_analysis_unlocked"
+    assert unlocked_data["isUnlocked"] is True
+    assert unlocked_data["canContinue"] is True
+    assert unlocked_data["canPay"] is False
+
     receipt = client.get(f"/api/v1/orders/{order['id']}/receipt", headers=headers)
     assert receipt.status_code == 200
     assert receipt.json()["receipt"]["totalAmount"] == 150000
@@ -597,6 +617,158 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
         audit_names = {event.event_type for event in db.query(AuditEvent).all()}
         assert "pago_desbloqueo.approved" in audit_names
         assert "pago_desbloqueo.unlocked" in audit_names
+    finally:
+        db.close()
+
+
+def test_pending_payment_flow_does_not_reuse_checkout_url(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    order_response = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        headers=headers,
+    )
+    order = order_response.json()["order"]
+    checkout = client.post(
+        "/api/v1/payments/checkout",
+        json={
+            "orderId": order["id"],
+            "paymentMethod": "CARD",
+            "customer": {
+                "fullName": "Maria Gomez",
+                "email": "maria@example.com",
+                "documentType": "CC",
+                "documentNumber": "52123456",
+                "phone": "3001112233",
+            },
+        },
+        headers=headers,
+    )
+    assert checkout.status_code == 201
+    payment = checkout.json()["payment"]
+
+    db = session_factory()
+    try:
+        stored_payment = db.get(Payment, UUID(payment["id"]))
+        invoice = stored_payment.raw_provider_payload["checkoutPayload"]["invoice"]
+    finally:
+        db.close()
+
+    webhook = client.post(
+        "/api/v1/payments/webhook/epayco",
+        json={
+            "x_ref_payco": "ref-pending-001",
+            "x_transaction_id": "tx-pending-001",
+            "x_amount": "150000.00",
+            "x_currency_code": "COP",
+            "x_id_invoice": invoice,
+            "x_cod_response": "3",
+            "x_response": "Pendiente",
+        },
+    )
+    assert webhook.status_code == 200
+
+    flow = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
+    assert flow.status_code == 200
+    data = flow.json()["paymentFlow"]
+    assert data["caseStatus"] == "payment_pending"
+    assert data["canPay"] is False
+    assert data["canRetry"] is False
+    assert data["payment"]["status"] == "pending"
+    assert data["payment"]["checkoutUrl"] is None
+
+    repeated_checkout = client.post(
+        "/api/v1/payments/checkout",
+        json={
+            "orderId": order["id"],
+            "paymentMethod": "CARD",
+            "customer": {
+                "fullName": "Maria Gomez",
+                "email": "maria@example.com",
+                "documentType": "CC",
+                "documentNumber": "52123456",
+                "phone": "3001112233",
+            },
+        },
+        headers=headers,
+    )
+    assert repeated_checkout.status_code == 409
+    assert repeated_checkout.json()["error"]["code"] == "PAYMENT_ALREADY_PENDING"
+
+
+def test_rejected_payment_retry_uses_new_epayco_invoice(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    order_response = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        headers=headers,
+    )
+    order = order_response.json()["order"]
+    checkout_payload = {
+        "orderId": order["id"],
+        "paymentMethod": "CARD",
+        "customer": {
+            "fullName": "Maria Gomez",
+            "email": "maria@example.com",
+            "documentType": "CC",
+            "documentNumber": "52123456",
+            "phone": "3001112233",
+        },
+    }
+    checkout = client.post("/api/v1/payments/checkout", json=checkout_payload, headers=headers)
+    first_payment = checkout.json()["payment"]
+
+    db = session_factory()
+    try:
+        first_invoice = db.get(Payment, UUID(first_payment["id"])).raw_provider_payload["checkoutPayload"]["invoice"]
+    finally:
+        db.close()
+
+    rejected = client.post(
+        "/api/v1/payments/webhook/epayco",
+        json={
+            "x_ref_payco": "ref-rejected-001",
+            "x_transaction_id": "tx-rejected-001",
+            "x_amount": "150000.00",
+            "x_currency_code": "COP",
+            "x_id_invoice": first_invoice,
+            "x_cod_response": "2",
+            "x_response": "Rechazada",
+        },
+    )
+    assert rejected.status_code == 200
+
+    rejected_flow = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
+    assert rejected_flow.status_code == 200
+    rejected_data = rejected_flow.json()["paymentFlow"]
+    assert rejected_data["caseStatus"] == "payment_rejected"
+    assert rejected_data["canPay"] is False
+    assert rejected_data["canRetry"] is True
+
+    retry = client.post(
+        f"/api/v1/orders/{order['id']}/retry-payment",
+        json={"paymentMethod": "CARD"},
+        headers=headers,
+    )
+    assert retry.status_code == 201
+    retry_payment = retry.json()["payment"]
+
+    db = session_factory()
+    try:
+        retry_invoice = db.get(Payment, UUID(retry_payment["id"])).raw_provider_payload["checkoutPayload"]["invoice"]
+        assert retry_payment["id"] != first_payment["id"]
+        assert retry_invoice != first_invoice
+        assert retry_invoice.startswith(first_invoice.rsplit("-", 1)[0])
     finally:
         db.close()
 

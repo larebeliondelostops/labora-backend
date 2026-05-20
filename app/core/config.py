@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     EPAYCO_CHECKOUT_TYPE: str = "onpage"
     EPAYCO_TEST_MODE: bool = True
     EPAYCO_COMMERCE_NAME: str = "Labora"
+    EPAYCO_RESPONSE_FRONTEND_URL: str = "https://labora.centralspike.com"
     EPAYCO_CHECKOUT_TIMEOUT_MS: int = 15000
     EPAYCO_CONFIRMATION_URL: str = ""
 
@@ -486,6 +487,10 @@ class Settings(BaseSettings):
     @property
     def epayco_commerce_name(self) -> str:
         return self.EPAYCO_COMMERCE_NAME or self.APP_NAME
+
+    @property
+    def epayco_response_frontend_url(self) -> str:
+        return (self.EPAYCO_RESPONSE_FRONTEND_URL or self.frontend_url).rstrip("/")
 
     @property
     def epayco_checkout_timeout_seconds(self) -> float:
