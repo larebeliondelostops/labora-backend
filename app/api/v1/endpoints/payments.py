@@ -163,12 +163,16 @@ def retry_order_payment(
 def get_case_payment_flow(
     case_id: str,
     request: Request,
+    provider: str | None = None,
+    ref_payco: str | None = None,
     context=Depends(get_current_user_context),
     db: Session = Depends(get_db),
 ) -> dict:
     user, _payload = context
     return PaymentService(db).get_payment_flow(
         case_id,
+        provider=provider,
+        ref_payco=ref_payco,
         user=user,
         ip_address=get_client_ip(request),
         user_agent=get_user_agent(request),

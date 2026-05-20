@@ -2,8 +2,9 @@ import hashlib
 import hmac
 import json
 import logging
+import unicodedata
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -26,6 +27,7 @@ from app.services.consent_service import ConsentComplianceService
 from app.services.epayco_service import (
     EpaycoCheckoutClient,
     EpaycoProviderError,
+    EpaycoReferenceClient,
     epayco_confirmation_signature,
     epayco_invoice_for_paywall,
     epayco_response_url_for_case,
@@ -717,6 +719,8 @@ class PaymentService:
         self,
         case_id: str,
         *,
+        provider: str | None = None,
+        ref_payco: str | None = None,
         user: User,
         ip_address: str | None,
         user_agent: str | None,
@@ -741,6 +745,15 @@ class PaymentService:
             expected_currency=configured_currency,
         )
         payment = self.payments.latest_payment_for_order(order.id) if order else None
+        if _normalize_text(provider) == "epayco" and ref_payco:
+            payment, order = self._reconcile_epayco_payment_flow_reference(
+                case=case,
+                order=order,
+                payment=payment,
+                ref_payco=ref_payco,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
         receipt = self.payments.receipt_for_order(order.id) if order else None
         is_unlocked = self._case_is_unlocked(case)
         payment_status = payment.status if payment else None
@@ -817,6 +830,148 @@ class PaymentService:
         )
         return response
 
+    def _reconcile_epayco_payment_flow_reference(
+        self,
+        *,
+        case: LaboraCase,
+        order: Order | None,
+        payment: Payment | None,
+        ref_payco: str,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> tuple[Payment | None, Order | None]:
+        reference = str(ref_payco or "").strip()
+        if not reference:
+            return payment, order
+
+        payment_by_reference = self.payments.payment_by_provider_id(
+            provider="epayco",
+            provider_payment_id=reference,
+        )
+        if payment_by_reference is not None:
+            if payment_by_reference.case_id != case.id:
+                logger.warning(
+                    "payment_flow_epayco_reference_case_mismatch %s",
+                    json.dumps(
+                        {
+                            "caseId": str(case.id),
+                            "paymentCaseId": str(payment_by_reference.case_id),
+                            "orderId": str(payment_by_reference.order_id),
+                            "paymentId": str(payment_by_reference.id),
+                            "refPayco": reference,
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    ),
+                )
+                return payment, order
+            payment = payment_by_reference
+            order = payment.order
+
+        if payment is None or order is None or payment.case_id != case.id:
+            logger.info(
+                "payment_flow_epayco_reference_unmatched %s",
+                json.dumps(
+                    {
+                        "caseId": str(case.id),
+                        "orderId": str(order.id) if order else None,
+                        "paymentId": str(payment.id) if payment else None,
+                        "refPayco": reference,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            )
+            return payment, order
+
+        if payment.status not in {"created", "checkout_started", "pending"}:
+            return payment, order
+
+        try:
+            raw_response = EpaycoReferenceClient().get_reference(reference)
+        except EpaycoProviderError as exc:
+            logger.warning(
+                "payment_flow_epayco_reference_lookup_failed %s",
+                json.dumps(
+                    {
+                        "caseId": str(case.id),
+                        "orderId": str(order.id),
+                        "paymentId": str(payment.id),
+                        "refPayco": reference,
+                        "errorCode": exc.code,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            )
+            return payment, order
+
+        provider_payload = _epayco_reference_payload(raw_response, reference)
+        provider_event = self._epayco_event(
+            payload=provider_payload,
+            raw_body=json.dumps(_json_safe(provider_payload), sort_keys=True).encode("utf-8"),
+        )
+        event_digest = _stable_hash(b"", raw_response)[:16]
+        provider_event = replace(
+            provider_event,
+            provider_event_id=(
+                f"reference_lookup:{reference}:"
+                f"{provider_event.normalized_status}:{event_digest}"
+            ),
+            event_type="payment.reference_lookup",
+        )
+        self._log_provider_confirmation(
+            case_id=case.id,
+            order_id=order.id,
+            payment_id=payment.id,
+            provider_reference=reference,
+            invoice=provider_event.invoice,
+            provider_status=provider_event.provider_status,
+            normalized_status=provider_event.normalized_status,
+        )
+        payment.provider_payment_id = payment.provider_payment_id or reference
+        payment.provider_status = provider_event.provider_status
+        payment.raw_provider_payload = _merge_provider_payload(
+            payment.raw_provider_payload,
+            provider_event.raw_payload,
+        )
+        payment.updated_at = utc_now()
+
+        existing = self.payments.transaction_by_event(
+            provider="epayco",
+            provider_event_id=provider_event.provider_event_id,
+        )
+        if existing is not None:
+            self.db.commit()
+            return payment, order
+
+        transaction = self.payments.create_transaction(
+            payment_id=payment.id,
+            order_id=order.id,
+            provider="epayco",
+            provider_event_id=provider_event.provider_event_id,
+            provider_payment_id=provider_event.provider_payment_id,
+            event_type=provider_event.event_type,
+            provider_status=provider_event.provider_status,
+            normalized_status=provider_event.normalized_status,
+            amount=provider_event.amount,
+            currency=provider_event.currency,
+            signature_valid=True,
+            processed=False,
+            raw_payload=_json_safe(provider_event.raw_payload),
+            created_at=utc_now(),
+        )
+        self._process_transaction(
+            transaction=transaction,
+            provider_event=provider_event,
+            payment=payment,
+            order=order,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        self.db.commit()
+        return payment, order
+
     def _process_transaction(
         self,
         *,
@@ -832,7 +987,10 @@ class PaymentService:
         payment.provider_payment_id = provider_event.provider_payment_id or payment.provider_payment_id
         payment.provider_checkout_id = provider_event.provider_checkout_id or payment.provider_checkout_id
         payment.provider_status = provider_event.provider_status
-        payment.raw_provider_payload = _json_safe(provider_event.raw_payload)
+        payment.raw_provider_payload = _merge_provider_payload(
+            payment.raw_provider_payload,
+            provider_event.raw_payload,
+        )
         payment.updated_at = now
         self._log_trace(
             event_name="payment.transaction.status_transition",
@@ -884,7 +1042,7 @@ class PaymentService:
                 source_module="payments",
                 metadata={"orderId": str(order.id), "paymentId": str(payment.id)},
             )
-        elif provider_event.normalized_status == "failed":
+        elif provider_event.normalized_status in {"failed", "cancelled"}:
             payment.failed_at = now
             order.status = "failed"
             self._set_case_status(
@@ -1312,8 +1470,21 @@ class PaymentService:
         paywall_id = paywall_id_from_epayco_invoice(invoice)
         if paywall_id is None:
             paywall_id = _uuid_or_none(payload.get("x_extra2") or payload.get("extra2"))
-        response_code = _first_string(payload, ["x_cod_response", "x_transaction_state"])
-        provider_status = _first_string(payload, ["x_response", "x_response_reason_text", "x_cod_response"])
+        response_code = _first_string(
+            payload,
+            ["x_cod_response", "x_cod_respuesta", "x_transaction_state"],
+        )
+        provider_status = _first_string(
+            payload,
+            [
+                "x_response",
+                "x_respuesta",
+                "x_response_reason_text",
+                "x_transaction_state",
+                "x_cod_response",
+                "x_cod_respuesta",
+            ],
+        )
         provider_event_id = (
             _first_string(payload, ["x_transaction_id", "x_ref_payco", "x_id_invoice"])
             or _stable_hash(raw_body, payload)
@@ -1325,8 +1496,8 @@ class PaymentService:
             event_type="payment.confirmation",
             provider_status=provider_status,
             normalized_status=_normalize_status(provider_status, response_code),
-            amount=_amount_from_payload(payload, ["x_amount_ok", "x_amount"]),
-            currency=_first_string(payload, ["x_currency_code"]),
+            amount=_amount_from_payload(payload, ["x_amount_ok", "x_amount", "x_amount_country"]),
+            currency=_first_string(payload, ["x_currency_code", "currency"]),
             invoice=invoice,
             paywall_id=paywall_id,
             raw_payload=payload,
@@ -2203,6 +2374,43 @@ def _provider_metadata_from_payment(payment: Payment) -> dict[str, Any]:
     }
 
 
+def _epayco_reference_payload(raw_response: dict[str, Any], ref_payco: str) -> dict[str, Any]:
+    data = raw_response.get("data") if isinstance(raw_response.get("data"), dict) else raw_response
+    payload = dict(data) if isinstance(data, dict) else {}
+    reference = str(ref_payco or "").strip()
+    payload.setdefault("x_ref_payco", reference)
+    _copy_first(payload, "x_ref_payco", ["ref_payco", "refPayco", "reference", "ref"])
+    _copy_first(payload, "x_transaction_id", ["transaction_id", "transactionId", "id"])
+    _copy_first(payload, "x_id_invoice", ["x_id_factura", "invoice", "id_invoice", "idInvoice"])
+    _copy_first(payload, "x_cod_response", ["x_cod_respuesta", "cod_response", "codResponse", "response_code", "responseCode"])
+    _copy_first(payload, "x_response", ["x_respuesta", "response", "status", "estado", "transaction_state"])
+    _copy_first(payload, "x_amount", ["amount", "total_amount", "totalAmount"])
+    _copy_first(payload, "x_amount_ok", ["amount_ok", "amountOk"])
+    _copy_first(payload, "x_currency_code", ["currency", "currency_code", "currencyCode"])
+    payload["providerReference"] = payload.get("providerReference") or payload.get("x_ref_payco") or reference
+    payload["refPayco"] = payload.get("refPayco") or payload.get("x_ref_payco") or reference
+    payload["_epaycoReferenceResponse"] = _json_safe(raw_response)
+    payload["_reconciledAt"] = utc_now()
+    return payload
+
+
+def _copy_first(payload: dict[str, Any], target: str, sources: list[str]) -> None:
+    if payload.get(target) not in (None, ""):
+        return
+    value = _first_string(payload, sources)
+    if value is not None:
+        payload[target] = value
+
+
+def _merge_provider_payload(existing: dict | None, incoming: dict[str, Any]) -> dict[str, Any]:
+    incoming_safe = _json_safe(incoming)
+    if not isinstance(existing, dict):
+        return incoming_safe
+    merged = dict(existing)
+    merged.update(incoming_safe)
+    return _json_safe(merged)
+
+
 def _normalize_status(provider_status: str | None, response_code: str | None) -> str:
     code = str(response_code or "").strip()
     if code == "1":
@@ -2214,17 +2422,28 @@ def _normalize_status(provider_status: str | None, response_code: str | None) ->
     if code == "4":
         return "failed"
     normalized = _normalize_text(provider_status)
-    if normalized in {"approved", "paid", "success", "aceptada", "accepted"}:
+    if normalized in {
+        "approved",
+        "approved ok",
+        "paid",
+        "success",
+        "aceptada",
+        "aceptado",
+        "accepted",
+        "aprobada",
+        "aprobado",
+        "ok",
+    }:
         return "approved"
     if normalized in {"pending", "processing", "pendiente"}:
         return "pending"
-    if normalized in {"rejected", "declined", "rechazada", "denegada"}:
+    if normalized in {"rejected", "declined", "rechazada", "rechazado", "denegada", "denegado"}:
         return "rejected"
-    if normalized in {"failed", "error", "fallida"}:
+    if normalized in {"failed", "error", "fallida", "fallido"}:
         return "failed"
-    if normalized in {"cancelled", "canceled", "cancelada"}:
+    if normalized in {"cancelled", "canceled", "cancelada", "cancelado"}:
         return "cancelled"
-    if normalized in {"expired", "expirada"}:
+    if normalized in {"expired", "expirada", "expirado"}:
         return "expired"
     if normalized in {"refunded", "reembolsada"}:
         return "refunded"
@@ -2250,6 +2469,7 @@ def _normalize_text(value: str | None) -> str:
     }
     for source, target in replacements.items():
         text = text.replace(source, target)
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     return text
 
 

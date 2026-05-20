@@ -34,6 +34,7 @@ class EpaycoProviderError(Exception):
 
 
 EPAYCO_CHECKOUT_BASE_URL = "https://new-checkout.epayco.co"
+EPAYCO_VALIDATION_REFERENCE_URL = "https://secure.epayco.co/validation/v1/reference"
 
 
 class EpaycoCheckoutClient:
@@ -195,6 +196,40 @@ class EpaycoCheckoutClient:
         if billing:
             payload["billing"] = billing
         return payload
+
+
+class EpaycoReferenceClient:
+    def get_reference(self, ref_payco: str) -> dict[str, Any]:
+        reference = str(ref_payco or "").strip()
+        if not reference:
+            raise EpaycoProviderError(
+                "La referencia de ePayco es requerida.",
+                code="EPAYCO_REFERENCE_REQUIRED",
+            )
+        try:
+            response = requests.get(
+                f"{EPAYCO_VALIDATION_REFERENCE_URL}/{quote(reference, safe='')}",
+                headers={"Accept": "application/json"},
+                timeout=settings.epayco_checkout_timeout_seconds,
+            )
+            response.raise_for_status()
+        except requests.Timeout as exc:
+            raise EpaycoProviderError(
+                "Timeout consultando la referencia de ePayco.",
+                code="EPAYCO_REFERENCE_TIMEOUT",
+            ) from exc
+        except requests.RequestException as exc:
+            raise EpaycoProviderError(
+                "No fue posible consultar la referencia de ePayco.",
+                code="EPAYCO_REFERENCE_FAILED",
+            ) from exc
+        data = response.json()
+        if not isinstance(data, dict):
+            raise EpaycoProviderError(
+                "ePayco retorno una respuesta de referencia invalida.",
+                code="EPAYCO_REFERENCE_INVALID",
+            )
+        return data
 
 
 def _checkout_amount(value: Decimal | None) -> float:

@@ -621,6 +621,96 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
         db.close()
 
 
+def test_payment_flow_reconciles_epayco_return_reference(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    order_response = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        headers=headers,
+    )
+    order = order_response.json()["order"]
+    checkout = client.post(
+        "/api/v1/payments/checkout",
+        json={
+            "orderId": order["id"],
+            "paymentMethod": "CARD",
+            "customer": {
+                "fullName": "Maria Gomez",
+                "email": "maria@example.com",
+                "documentType": "CC",
+                "documentNumber": "52123456",
+                "phone": "3001112233",
+            },
+        },
+        headers=headers,
+    )
+    payment = checkout.json()["payment"]
+
+    db = session_factory()
+    try:
+        stored_payment = db.get(Payment, UUID(payment["id"]))
+        invoice = stored_payment.raw_provider_payload["checkoutPayload"]["invoice"]
+    finally:
+        db.close()
+
+    def fake_reference(_self, ref_payco):
+        assert ref_payco == "ref-return-001"
+        return {
+            "success": True,
+            "data": {
+                "x_ref_payco": "ref-return-001",
+                "x_transaction_id": "tx-return-001",
+                "x_amount": "150000.00",
+                "x_currency_code": "COP",
+                "x_id_invoice": invoice,
+                "x_cod_response": "1",
+                "x_response": "Aceptada",
+            },
+        }
+
+    monkeypatch.setattr(
+        "app.services.payment_service.EpaycoReferenceClient.get_reference",
+        fake_reference,
+    )
+
+    flow_response = client.get(
+        f"/api/v1/cases/{case_id}/payment-flow?provider=epayco&ref_payco=ref-return-001",
+        headers=headers,
+    )
+
+    assert flow_response.status_code == 200
+    flow = flow_response.json()["paymentFlow"]
+    assert flow["caseStatus"] == "full_analysis_unlocked"
+    assert flow["isUnlocked"] is True
+    assert flow["canContinue"] is True
+    assert flow["canPay"] is False
+    assert flow["payment"]["status"] == "approved"
+    assert flow["payment"]["refPayco"] == "ref-return-001"
+
+    db = session_factory()
+    try:
+        case = db.get(LaboraCase, UUID(case_id))
+        stored_order = db.get(Order, UUID(order["id"]))
+        stored_payment = db.get(Payment, UUID(payment["id"]))
+        assert case.status == "full_analysis_unlocked"
+        assert stored_order.status == "paid"
+        assert stored_payment.status == "approved"
+        assert stored_payment.provider_payment_id == "ref-return-001"
+        assert stored_payment.provider_status == "Aceptada"
+        assert stored_payment.raw_provider_payload["refPayco"] == "ref-return-001"
+        assert stored_payment.raw_provider_payload["_epaycoReferenceResponse"]["success"] is True
+        assert db.query(PaymentTransaction).count() == 1
+        assert db.query(UnlockEvent).count() == 1
+        assert db.query(Receipt).count() == 1
+    finally:
+        db.close()
+
+
 def test_pending_payment_flow_does_not_reuse_checkout_url(client_and_session) -> None:
     client, session_factory = client_and_session
     user_id, headers = _create_user(session_factory)
