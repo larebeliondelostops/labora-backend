@@ -1671,6 +1671,8 @@ class PaymentService:
                         {
                             "caseId": str(case.id),
                             "reason": exc.code,
+                            "message": exc.message,
+                            "details": _json_safe(exc.details) if exc.details else None,
                         },
                         ensure_ascii=True,
                         sort_keys=True,
