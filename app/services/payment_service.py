@@ -666,8 +666,9 @@ class PaymentService:
         configured_price = self._unlock_price()
         configured_currency = self._currency()
         order = self.payments.latest_order_for_case(case_id=case.id, product_code=PRODUCT_CODE)
+        provision_reason = "not_needed_existing_order" if order is not None else "not_attempted"
         if order is None:
-            order = self._provision_order_for_payment_flow(
+            order, provision_reason = self._provision_order_for_payment_flow(
                 case=case,
                 user=user,
                 ip_address=ip_address,
@@ -710,9 +711,26 @@ class PaymentService:
             payload={
                 "configuredUnlockPriceCop": configured_price,
                 "configuredCurrency": configured_currency,
+                "provisionReason": provision_reason,
                 "order": self._order_payload(order) if order else None,
             },
         )
+        if order is None:
+            logger.warning(
+                "payment_flow_order_unavailable %s",
+                json.dumps(
+                    {
+                        "traceId": trace_id,
+                        "caseId": str(case.id),
+                        "userId": str(user.id),
+                        "caseStatus": case.status,
+                        "provisionReason": provision_reason,
+                        "canUpdateCase": self._can_update(case, user),
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            )
         logger.warning(
             "payment_flow_front_payload %s",
             json.dumps(
@@ -1623,13 +1641,13 @@ class PaymentService:
         user: User,
         ip_address: str | None,
         user_agent: str | None,
-    ) -> Order | None:
+    ) -> tuple[Order | None, str]:
         if self._case_is_unlocked(case):
-            return None
+            return None, "case_already_unlocked"
         if case.status not in ELIGIBLE_CASE_STATUSES:
-            return None
+            return None, f"case_status_not_eligible:{case.status}"
         if not self._can_update(case, user):
-            return None
+            return None, "user_cannot_update_case"
         try:
             created = self.create_order(
                 str(case.id),
@@ -1658,12 +1676,15 @@ class PaymentService:
                         sort_keys=True,
                     ),
                 )
-                return None
+                return None, f"create_order_failed:{exc.code}"
             raise
         created_id = (created.get("order") or {}).get("id")
         if not created_id:
-            return None
-        return self.payments.get_order(created_id)
+            return None, "create_order_response_missing_id"
+        created_order = self.payments.get_order(created_id)
+        if created_order is None:
+            return None, "create_order_persisted_order_not_found"
+        return created_order, "order_provisioned"
 
     def _order_requires_repricing(
         self,
