@@ -743,6 +743,32 @@ def test_payment_flow_fails_when_unlock_price_config_is_zero(client_and_session,
     assert response.json()["error"]["details"]["rawValue"] == 0
 
 
+def test_payment_flow_auto_provisions_order_when_preview_requires_review(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(
+        session_factory,
+        user_id=user_id,
+        case_id=UUID(case_id),
+        status="completed",
+        confidence=Decimal("0.6500"),
+    )
+
+    flow_response = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
+    assert flow_response.status_code == 200
+    flow = flow_response.json()["paymentFlow"]
+    order = flow["order"]
+
+    assert flow["canPay"] is True
+    assert order is not None
+    assert order["subtotalAmount"] == 150000
+    assert order["taxAmount"] == 0
+    assert order["totalAmount"] == 150000
+    assert order["currency"] == "COP"
+
+
 def _create_user(session_factory, *, role: str = "user"):
     db = session_factory()
     try:

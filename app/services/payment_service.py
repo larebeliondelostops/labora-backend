@@ -1178,11 +1178,19 @@ class PaymentService:
             )
         preview = self._preview_for_paywall(paywall)
         if preview.status == "requires_review" or preview.requires_human_review or paywall.status == "requires_review":
-            raise ApiError(
-                status_code=status.HTTP_423_LOCKED,
-                code="CASE_NOT_ELIGIBLE_FOR_PAYMENT",
-                message="El expediente requiere revision interna antes de pagar.",
-                details={"caseId": str(case.id), "previewId": str(preview.id)},
+            logger.warning(
+                "payment_order_review_required_but_allowed %s",
+                json.dumps(
+                    {
+                        "caseId": str(case.id),
+                        "previewId": str(preview.id),
+                        "previewStatus": preview.status,
+                        "previewRequiresHumanReview": bool(preview.requires_human_review),
+                        "paywallStatus": paywall.status,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
             )
         self._ensure_paywall_pricing(paywall)
         return preview, paywall
