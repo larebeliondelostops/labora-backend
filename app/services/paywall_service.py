@@ -29,6 +29,7 @@ from app.services.epayco_service import (
     EpaycoCheckoutClient,
     EpaycoProviderError,
     epayco_confirmation_signature,
+    epayco_response_url_for_case,
     paywall_id_from_epayco_invoice,
 )
 from app.utils.dates import utc_now
@@ -303,12 +304,14 @@ class PaywallPreviewService:
                 message="returnUrl debe ser una URL http o https.",
             )
 
+        checkout_return_url = epayco_response_url_for_case(case.id, return_url)
+
         try:
             checkout_session = EpaycoCheckoutClient().create_session(
                 case=case,
                 preview=preview,
                 paywall=paywall,
-                return_url=return_url,
+                return_url=checkout_return_url,
             )
         except EpaycoProviderError as exc:
             raise ApiError(
@@ -330,7 +333,7 @@ class PaywallPreviewService:
                 "checkoutSessionId": checkout_session.session_id,
                 "invoice": checkout_session.invoice,
                 "source": source,
-                "returnUrl": return_url,
+                "returnUrl": checkout_return_url,
                 "previewId": str(preview.id),
             },
         )

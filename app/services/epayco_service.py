@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -50,7 +50,7 @@ class EpaycoCheckoutClient:
         confirmation_url: str | None = None,
     ) -> EpaycoCheckoutSession:
         invoice = epayco_invoice_for_paywall(paywall.id)
-        response_url = return_url or f"{settings.frontend_url}/app/cases/{case.id}/preview?payment=return"
+        response_url = epayco_response_url_for_case(case.id, return_url)
         expires_at = utc_now() + timedelta(hours=1)
         payload = self._payload(
             case=case,
@@ -220,6 +220,18 @@ def _checkout_amount(value: Decimal | None) -> float:
 def epayco_checkout_url_for_session(session_id: str, checkout_type: str | None = None) -> str:
     path = "checkout-standard" if (checkout_type or settings.epayco_checkout_type) == "standard" else "checkout"
     return f"{EPAYCO_CHECKOUT_BASE_URL}/{path}/{quote(str(session_id), safe='')}"
+
+
+def epayco_response_url_for_case(case_id: uuid.UUID, return_url: str | None = None) -> str:
+    if return_url and not _is_pre_payment_return_url(return_url):
+        return return_url.strip()
+    return f"{settings.frontend_url}/app/cases/{case_id}/payment/return?provider=epayco"
+
+
+def _is_pre_payment_return_url(return_url: str) -> bool:
+    parsed = urlparse(return_url.strip())
+    path = parsed.path.rstrip("/").lower()
+    return path.endswith(("/checkout", "/preview")) or "/checkout/" in path or "/preview/" in path
 
 
 def _checkout_url_from_response(response: dict[str, Any], session_id: str) -> str:

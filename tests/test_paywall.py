@@ -104,6 +104,14 @@ def test_owner_can_generate_view_checkout_and_track_paywall(client_and_session) 
 
     db = session_factory()
     try:
+        checkout_audit = next(
+            event
+            for event in db.query(AuditEvent).all()
+            if (event.metadata_json or {}).get("action") == "checkout_started"
+        )
+        assert checkout_audit.metadata_json["epaycoPayload"]["response"] == (
+            f"http://localhost:3000/app/cases/{case_id}/payment/return?provider=epayco"
+        )
         case = db.get(LaboraCase, UUID(case_id))
         case.status = "paid_unlocked"
         case.current_step = "analysis_unlocked"
@@ -277,7 +285,10 @@ def test_payment_checkout_allows_preview_requires_review_and_reuses_pending_paym
 
     order_response = client.post(
         f"/api/v1/cases/{case_id}/orders",
-        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        json={
+            "productCode": "FULL_ANALYSIS_UNLOCK",
+            "returnUrl": f"https://labora.centralspike.com/app/cases/{case_id}/checkout",
+        },
         headers=headers,
     )
     assert order_response.status_code == 201
@@ -317,6 +328,15 @@ def test_payment_checkout_allows_preview_requires_review_and_reuses_pending_paym
     assert payment["status"] == "checkout_started"
     assert payment["checkoutUrl"].startswith("https://new-checkout.epayco.co/checkout/")
     assert "requiere revision interna" not in checkout.text.lower()
+
+    db = session_factory()
+    try:
+        stored_payment = db.get(Payment, UUID(payment["id"]))
+        expected_return_url = f"http://localhost:3000/app/cases/{case_id}/payment/return?provider=epayco"
+        assert stored_payment.return_url == expected_return_url
+        assert stored_payment.raw_provider_payload["checkoutPayload"]["response"] == expected_return_url
+    finally:
+        db.close()
 
     resumed_checkout = client.post("/api/v1/payments/checkout", json=checkout_payload, headers=headers)
     assert resumed_checkout.status_code == 201
@@ -377,6 +397,9 @@ def test_checkout_uses_epayco_apify_when_configured(client_and_session, monkeypa
     assert calls[1]["json"]["checkout_version"] == "2"
     assert calls[1]["json"]["amount"] == 150000.0
     assert calls[1]["json"]["invoice"].startswith("LABORA-")
+    assert calls[1]["json"]["response"] == (
+        f"http://localhost:3000/app/cases/{case_id}/payment/return?provider=epayco"
+    )
     assert calls[1]["json"]["confirmation"].endswith("/api/v1/payments/epayco/confirmation")
 
 
@@ -516,6 +539,9 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
         invoice = epayco_invoice_for_paywall(stored_order.paywall_id)
         assert stored_pending_payment.raw_provider_payload["checkoutPayload"]["confirmation"].endswith(
             "/api/v1/payments/webhook/epayco"
+        )
+        assert stored_pending_payment.raw_provider_payload["checkoutPayload"]["response"] == (
+            f"https://labora.centralspike.com/casos/{case_id}/pago/retorno"
         )
         assert stored_pending_payment.raw_provider_payload["customer"] == {
             "fullName": "Maria Gomez",

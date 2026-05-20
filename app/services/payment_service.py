@@ -27,6 +27,7 @@ from app.services.epayco_service import (
     EpaycoCheckoutClient,
     EpaycoProviderError,
     epayco_confirmation_signature,
+    epayco_response_url_for_case,
     paywall_id_from_epayco_invoice,
 )
 from app.utils.dates import utc_now
@@ -281,7 +282,10 @@ class PaymentService:
             paywall.price_label = _format_price_label(order.total_amount, order.currency)
             paywall.updated_at = utc_now()
         preview = self._preview_for_paywall(paywall)
-        checkout_return_url = return_url or (order.metadata_json or {}).get("returnUrl")
+        checkout_return_url = epayco_response_url_for_case(
+            case.id,
+            return_url or (order.metadata_json or {}).get("returnUrl"),
+        )
         trace_id = self._trace_id("checkout")
         self._log_trace(
             event_name="payment.checkout.before_provider_call",
