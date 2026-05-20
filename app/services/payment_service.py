@@ -662,7 +662,15 @@ class PaymentService:
     ) -> dict[str, Any]:
         case = self._get_case_or_404(case_id)
         self._require_can_view(case, user, ip_address, user_agent)
+        trace_id = self._trace_id("payment_flow")
+        configured_price = self._unlock_price()
+        configured_currency = self._currency()
         order = self.payments.latest_order_for_case(case_id=case.id, product_code=PRODUCT_CODE)
+        order = self._repair_order_for_payment_flow(
+            order=order,
+            expected_price=configured_price,
+            expected_currency=configured_currency,
+        )
         payment = self.payments.latest_payment_for_order(order.id) if order else None
         receipt = self.payments.receipt_for_order(order.id) if order else None
         is_unlocked = self._case_is_unlocked(case)
@@ -672,7 +680,7 @@ class PaymentService:
             and order is not None
             and (payment is None or payment.status in {"rejected", "failed", "expired", "cancelled"})
         )
-        return {
+        response = {
             "paymentFlow": {
                 "caseId": str(case.id),
                 "caseStatus": self._case_payment_status(case, payment),
@@ -686,6 +694,19 @@ class PaymentService:
                 "uiMessage": self._payment_flow_message(case, order, payment, receipt),
             }
         }
+        self._log_trace(
+            event_name="payment.flow.response",
+            trace_id=trace_id,
+            case_id=case.id,
+            order_id=order.id if order else None,
+            payment_id=payment.id if payment else None,
+            payload={
+                "configuredUnlockPriceCop": configured_price,
+                "configuredCurrency": configured_currency,
+                "order": self._order_payload(order) if order else None,
+            },
+        )
+        return response
 
     def _process_transaction(
         self,
@@ -1484,7 +1505,114 @@ class PaymentService:
         return (settings.payment_currency or "COP").strip().upper()
 
     def _unlock_price(self) -> int:
-        return max(settings.full_analysis_unlock_price_cop, 0)
+        raw_price = getattr(settings, "FULL_ANALYSIS_UNLOCK_PRICE_COP", None)
+        try:
+            price = int(raw_price)
+        except (TypeError, ValueError):
+            raise ApiError(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                code="PAYMENT_PRICE_CONFIG_INVALID",
+                message="La configuracion de FULL_ANALYSIS_UNLOCK_PRICE_COP no es valida.",
+                details={"envVar": "FULL_ANALYSIS_UNLOCK_PRICE_COP", "rawValue": raw_price},
+            ) from None
+        if price <= 0:
+            raise ApiError(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                code="PAYMENT_PRICE_CONFIG_INVALID",
+                message="La configuracion de FULL_ANALYSIS_UNLOCK_PRICE_COP debe ser mayor a cero.",
+                details={"envVar": "FULL_ANALYSIS_UNLOCK_PRICE_COP", "rawValue": raw_price},
+            )
+        logger.info(
+            "payment_price_config %s",
+            json.dumps(
+                {
+                    "envVar": "FULL_ANALYSIS_UNLOCK_PRICE_COP",
+                    "rawValue": raw_price,
+                    "resolvedValue": price,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
+        return price
+
+    def _repair_order_for_payment_flow(
+        self,
+        *,
+        order: Order | None,
+        expected_price: int,
+        expected_currency: str,
+    ) -> Order | None:
+        if order is None or order.status in ORDER_PAID_STATUSES:
+            return order
+        if not self._order_requires_repricing(
+            order=order,
+            expected_price=expected_price,
+            expected_currency=expected_currency,
+        ):
+            return order
+        now = utc_now()
+        order.status = "expired"
+        order.updated_at = now
+        replacement_order = self.payments.create_order(
+            case_id=order.case_id,
+            user_id=order.user_id,
+            paywall_id=order.paywall_id,
+            status="created",
+            currency=expected_currency,
+            subtotal_amount=expected_price,
+            tax_amount=0,
+            discount_amount=0,
+            total_amount=expected_price,
+            product_code=PRODUCT_CODE,
+            product_name=PRODUCT_NAME,
+            description=PRODUCT_DESCRIPTION,
+            expires_at=now + timedelta(minutes=settings.payment_order_expiration_minutes),
+            metadata_json=order.metadata_json,
+            created_at=now,
+            updated_at=now,
+        )
+        self.db.flush()
+        logger.info(
+            "payment_flow_order_repaired %s",
+            json.dumps(
+                {
+                    "previousOrderId": str(order.id),
+                    "replacementOrderId": str(replacement_order.id),
+                    "previousSubtotalAmount": order.subtotal_amount,
+                    "previousTaxAmount": order.tax_amount,
+                    "previousTotalAmount": order.total_amount,
+                    "resolvedSubtotalAmount": replacement_order.subtotal_amount,
+                    "resolvedTaxAmount": replacement_order.tax_amount,
+                    "resolvedTotalAmount": replacement_order.total_amount,
+                    "currency": replacement_order.currency,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
+        self.db.commit()
+        self.db.refresh(replacement_order)
+        return replacement_order
+
+    def _order_requires_repricing(
+        self,
+        *,
+        order: Order,
+        expected_price: int,
+        expected_currency: str,
+    ) -> bool:
+        if (order.currency or "").strip().upper() != expected_currency:
+            return True
+        if order.total_amount != expected_price:
+            return True
+        if order.subtotal_amount != expected_price:
+            return True
+        if order.tax_amount < 0 or order.discount_amount < 0:
+            return True
+        if order.subtotal_amount + order.tax_amount - order.discount_amount != order.total_amount:
+            return True
+        return False
 
     def _ensure_paywall_pricing(self, paywall: Paywall) -> None:
         expected_price = self._unlock_price()

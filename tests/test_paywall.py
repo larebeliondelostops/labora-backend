@@ -652,6 +652,68 @@ def test_order_is_recreated_when_active_amount_is_zero(client_and_session) -> No
         db.close()
 
 
+def test_payment_flow_repairs_zero_amount_order_with_env_price(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    monkeypatch.setattr("app.services.payment_service.settings.FULL_ANALYSIS_UNLOCK_PRICE_COP", 85000)
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    created = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        headers=headers,
+    )
+    assert created.status_code == 201
+    original_order_id = created.json()["order"]["id"]
+
+    db = session_factory()
+    try:
+        stored_order = db.get(Order, UUID(original_order_id))
+        stored_order.subtotal_amount = 0
+        stored_order.tax_amount = 0
+        stored_order.total_amount = 0
+        db.commit()
+    finally:
+        db.close()
+
+    flow_response = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
+    assert flow_response.status_code == 200
+    flow_order = flow_response.json()["paymentFlow"]["order"]
+
+    assert flow_order["id"] != original_order_id
+    assert flow_order["subtotalAmount"] == 85000
+    assert flow_order["taxAmount"] == 0
+    assert flow_order["totalAmount"] == 85000
+
+    db = session_factory()
+    try:
+        stale_order = db.get(Order, UUID(original_order_id))
+        replacement_order = db.get(Order, UUID(flow_order["id"]))
+        assert stale_order.status == "expired"
+        assert replacement_order.total_amount == 85000
+        assert replacement_order.subtotal_amount == 85000
+    finally:
+        db.close()
+
+
+def test_payment_flow_fails_when_unlock_price_config_is_zero(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    monkeypatch.setattr("app.services.payment_service.settings.FULL_ANALYSIS_UNLOCK_PRICE_COP", 0)
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    response = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "PAYMENT_PRICE_CONFIG_INVALID"
+    assert response.json()["error"]["details"]["envVar"] == "FULL_ANALYSIS_UNLOCK_PRICE_COP"
+    assert response.json()["error"]["details"]["rawValue"] == 0
+
+
 def _create_user(session_factory, *, role: str = "user"):
     db = session_factory()
     try:
