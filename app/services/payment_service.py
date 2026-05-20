@@ -666,6 +666,13 @@ class PaymentService:
         configured_price = self._unlock_price()
         configured_currency = self._currency()
         order = self.payments.latest_order_for_case(case_id=case.id, product_code=PRODUCT_CODE)
+        if order is None:
+            order = self._provision_order_for_payment_flow(
+                case=case,
+                user=user,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
         order = self._repair_order_for_payment_flow(
             order=order,
             expected_price=configured_price,
@@ -1595,6 +1602,55 @@ class PaymentService:
         self.db.refresh(replacement_order)
         return replacement_order
 
+    def _provision_order_for_payment_flow(
+        self,
+        *,
+        case: LaboraCase,
+        user: User,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> Order | None:
+        if self._case_is_unlocked(case):
+            return None
+        if case.status not in ELIGIBLE_CASE_STATUSES:
+            return None
+        if not self._can_update(case, user):
+            return None
+        try:
+            created = self.create_order(
+                str(case.id),
+                product_code=PRODUCT_CODE,
+                return_url=None,
+                cancel_url=None,
+                user=user,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+        except ApiError as exc:
+            if exc.code in {
+                "FORBIDDEN",
+                "CASE_NOT_ELIGIBLE_FOR_PAYMENT",
+                "CASE_ALREADY_UNLOCKED",
+                "CONSENT_REQUIRED",
+            }:
+                logger.info(
+                    "payment_flow_order_not_provisioned %s",
+                    json.dumps(
+                        {
+                            "caseId": str(case.id),
+                            "reason": exc.code,
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    ),
+                )
+                return None
+            raise
+        created_id = (created.get("order") or {}).get("id")
+        if not created_id:
+            return None
+        return self.payments.get_order(created_id)
+
     def _order_requires_repricing(
         self,
         *,
@@ -1711,7 +1767,18 @@ class PaymentService:
     def _payment_flow_order(self, order: Order | None) -> dict[str, Any] | None:
         if order is None:
             return None
-        return self._order_payload(order)
+        payload = self._order_payload(order)
+        payload.update(
+            {
+                "subtotal_amount": payload["subtotalAmount"],
+                "subtotal": payload["subtotalAmount"],
+                "tax_amount": payload["taxAmount"],
+                "tax": payload["taxAmount"],
+                "total_amount": payload["totalAmount"],
+                "amount": payload["totalAmount"],
+            }
+        )
+        return payload
 
     def _payment_flow_payment(self, payment: Payment | None) -> dict[str, Any] | None:
         if payment is None:

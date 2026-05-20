@@ -515,6 +515,35 @@ def test_payment_flow_exposes_complete_order_contract(client_and_session) -> Non
     assert flow_order["productCode"] == order["productCode"] == "FULL_ANALYSIS_UNLOCK"
 
 
+def test_payment_flow_provisions_order_when_missing_and_keeps_amount_aliases(client_and_session, monkeypatch) -> None:
+    client, session_factory = client_and_session
+    monkeypatch.setattr("app.services.payment_service.settings.FULL_ANALYSIS_UNLOCK_PRICE_COP", 85000)
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    flow_response = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
+    assert flow_response.status_code == 200
+    flow = flow_response.json()["paymentFlow"]
+    flow_order = flow["order"]
+
+    assert flow["canPay"] is True
+    assert flow_order is not None
+    assert flow_order["subtotalAmount"] == 85000
+    assert flow_order["taxAmount"] == 0
+    assert flow_order["discountAmount"] == 0
+    assert flow_order["totalAmount"] == 85000
+    assert flow_order["currency"] == "COP"
+    assert flow_order["subtotal_amount"] == 85000
+    assert flow_order["subtotal"] == 85000
+    assert flow_order["tax_amount"] == 0
+    assert flow_order["tax"] == 0
+    assert flow_order["total_amount"] == 85000
+    assert flow_order["amount"] == 85000
+    assert isinstance(flow_order["totalAmount"], int)
+
+
 def test_checkout_realigns_paywall_amount_and_never_sends_zero(client_and_session) -> None:
     client, session_factory = client_and_session
     user_id, headers = _create_user(session_factory)
