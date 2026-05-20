@@ -223,15 +223,26 @@ def epayco_checkout_url_for_session(session_id: str, checkout_type: str | None =
 
 
 def epayco_response_url_for_case(case_id: uuid.UUID, return_url: str | None = None) -> str:
-    if return_url and not _is_pre_payment_return_url(return_url):
-        return return_url.strip()
-    return f"{settings.frontend_url}/app/cases/{case_id}/payment/return?provider=epayco"
+    normalized = return_url.strip() if return_url else None
+    if normalized and not _is_pre_payment_return_url(normalized):
+        return normalized
+    frontend_base_url = _frontend_base_url_from_return_url(normalized) or settings.frontend_url
+    return f"{frontend_base_url}/app/cases/{case_id}/payment/return?provider=epayco"
 
 
 def _is_pre_payment_return_url(return_url: str) -> bool:
     parsed = urlparse(return_url.strip())
     path = parsed.path.rstrip("/").lower()
     return path.endswith(("/checkout", "/preview")) or "/checkout/" in path or "/preview/" in path
+
+
+def _frontend_base_url_from_return_url(return_url: str | None) -> str | None:
+    if not return_url:
+        return None
+    parsed = urlparse(return_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
 
 
 def _checkout_url_from_response(response: dict[str, Any], session_id: str) -> str:

@@ -110,7 +110,7 @@ def test_owner_can_generate_view_checkout_and_track_paywall(client_and_session) 
             if (event.metadata_json or {}).get("action") == "checkout_started"
         )
         assert checkout_audit.metadata_json["epaycoPayload"]["response"] == (
-            f"http://localhost:3000/app/cases/{case_id}/payment/return?provider=epayco"
+            f"https://labora.centralspike.com/app/cases/{case_id}/payment/return?provider=epayco"
         )
         case = db.get(LaboraCase, UUID(case_id))
         case.status = "paid_unlocked"
@@ -332,7 +332,7 @@ def test_payment_checkout_allows_preview_requires_review_and_reuses_pending_paym
     db = session_factory()
     try:
         stored_payment = db.get(Payment, UUID(payment["id"]))
-        expected_return_url = f"http://localhost:3000/app/cases/{case_id}/payment/return?provider=epayco"
+        expected_return_url = f"https://labora.centralspike.com/app/cases/{case_id}/payment/return?provider=epayco"
         assert stored_payment.return_url == expected_return_url
         assert stored_payment.raw_provider_payload["checkoutPayload"]["response"] == expected_return_url
     finally:
