@@ -426,8 +426,26 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
     )
     assert checkout.status_code == 201
     payment = checkout.json()["payment"]
-    assert payment["status"] == "pending"
+    assert payment["status"] == "checkout_started"
     assert payment["checkoutUrl"].startswith("http://localhost:3000/app/cases/")
+
+    repeated_checkout = client.post(
+        "/api/v1/payments/checkout",
+        json={
+            "orderId": order["id"],
+            "paymentMethod": "CARD",
+            "customer": {
+                "fullName": "Maria Gomez",
+                "email": "maria@example.com",
+                "documentType": "CC",
+                "documentNumber": "52123456",
+                "phone": "3001112233",
+            },
+        },
+        headers=headers,
+    )
+    assert repeated_checkout.status_code == 201
+    assert repeated_checkout.json()["payment"]["id"] == payment["id"]
 
     db = session_factory()
     try:
@@ -437,6 +455,14 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
         assert stored_pending_payment.raw_provider_payload["checkoutPayload"]["confirmation"].endswith(
             "/api/v1/payments/webhook/epayco"
         )
+        assert stored_pending_payment.raw_provider_payload["customer"] == {
+            "fullName": "Maria Gomez",
+            "email": "maria@example.com",
+            "documentType": "CC",
+            "documentNumber": "52123456",
+            "phone": "3001112233",
+        }
+        assert stored_pending_payment.raw_provider_payload["customerMasked"]["documentNumberLast4"] == "3456"
     finally:
         db.close()
 

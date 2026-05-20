@@ -133,6 +133,7 @@ CASE_STATUS_TRANSITIONS = {
     },
     "payment_order_created": {
         "payment_pending",
+        "payment_approved",
         "payment_expired",
         "payment_rejected",
         "payment_failed",
@@ -168,6 +169,7 @@ CASE_STATUS_TRANSITIONS = {
     "payment_rejected": {
         "payment_order_created",
         "payment_pending",
+        "payment_approved",
         "payment_failed",
         "payment_expired",
         "requires_review",
@@ -179,6 +181,7 @@ CASE_STATUS_TRANSITIONS = {
     "payment_failed": {
         "payment_order_created",
         "payment_pending",
+        "payment_approved",
         "payment_expired",
         "requires_review",
         "blocked",
@@ -189,6 +192,7 @@ CASE_STATUS_TRANSITIONS = {
     "payment_expired": {
         "payment_order_created",
         "payment_pending",
+        "payment_approved",
         "requires_review",
         "blocked",
         "closed",

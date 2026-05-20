@@ -73,7 +73,7 @@ class PaymentRepository:
             self.db.query(Payment)
             .filter(
                 Payment.order_id == order_id,
-                Payment.status.in_(["created", "pending"]),
+                Payment.status.in_(["created", "checkout_started", "pending"]),
             )
             .order_by(desc(Payment.created_at))
             .first()

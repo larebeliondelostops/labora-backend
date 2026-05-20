@@ -261,9 +261,14 @@ class PaymentService:
         self._require_order_can_checkout(order, allow_retry=allow_retry)
         if reuse_existing:
             existing_payment = self.payments.pending_payment_for_order(order.id)
-            if existing_payment is not None and existing_payment.checkout_url:
-                self.db.commit()
-                return {"payment": self._payment_payload(existing_payment)}
+            if existing_payment is not None:
+                if existing_payment.expires_at and _as_utc(existing_payment.expires_at) <= utc_now():
+                    existing_payment.status = "expired"
+                    existing_payment.provider_status = existing_payment.provider_status or "checkout_expired"
+                    existing_payment.updated_at = utc_now()
+                elif existing_payment.checkout_url:
+                    self.db.commit()
+                    return {"payment": self._payment_payload(existing_payment)}
 
         paywall = self._paywall_for_order(order)
         self._ensure_paywall_pricing(paywall)
@@ -353,7 +358,7 @@ class PaymentService:
             provider_payment_id=None,
             provider_checkout_id=checkout_session.session_id,
             idempotency_key=f"checkout:{order.id}:{uuid.uuid4()}",
-            status="pending",
+            status="checkout_started",
             provider_status="checkout_started",
             currency=order.currency,
             amount=order.total_amount,
@@ -364,7 +369,8 @@ class PaymentService:
             raw_provider_payload={
                 "checkoutPayload": _json_safe(checkout_session.provider_payload),
                 "providerResponse": _json_safe(checkout_session.raw_response),
-                "customer": _safe_customer_metadata(customer),
+                "customer": _normalized_customer_profile(customer),
+                "customerMasked": _safe_customer_metadata(customer),
             },
             created_at=now,
             updated_at=now,
@@ -376,8 +382,8 @@ class PaymentService:
         paywall.updated_at = now
         self._set_case_status(
             case,
-            new_status="payment_pending",
-            reason="Checkout de pago iniciado.",
+            new_status="payment_order_created",
+            reason="Checkout de pago iniciado, en espera de interaccion en pasarela.",
             source_module="payments",
             metadata={"orderId": str(order.id), "paymentId": str(payment.id)},
         )
@@ -402,6 +408,7 @@ class PaymentService:
             metadata={
                 "provider": payment.provider,
                 "providerCheckoutId": payment.provider_checkout_id,
+                "providerStatus": payment.provider_status,
                 "checkoutInvoice": checkout_session.invoice,
             },
             ip_address=ip_address,
@@ -764,6 +771,21 @@ class PaymentService:
         payment.provider_status = provider_event.provider_status
         payment.raw_provider_payload = _json_safe(provider_event.raw_payload)
         payment.updated_at = now
+        self._log_trace(
+            event_name="payment.transaction.status_transition",
+            trace_id=self._trace_id("txn"),
+            case_id=case.id,
+            order_id=order.id,
+            payment_id=payment.id,
+            payload={
+                "provider": payment.provider,
+                "providerEventId": provider_event.provider_event_id,
+                "providerPaymentId": provider_event.provider_payment_id,
+                "providerCheckoutId": provider_event.provider_checkout_id,
+                "providerStatus": provider_event.provider_status,
+                "normalizedStatus": provider_event.normalized_status,
+            },
+        )
         if provider_event.normalized_status == "approved":
             if not self._payment_amount_matches(order, provider_event):
                 self._mark_requires_review(
@@ -2120,6 +2142,16 @@ def _safe_customer_metadata(customer: dict[str, Any]) -> dict[str, Any]:
             customer.get("documentNumber") or customer.get("document_number") or ""
         )[-4:],
         "phoneLast4": str(customer.get("phone") or "")[-4:],
+    }
+
+
+def _normalized_customer_profile(customer: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "fullName": str(customer.get("fullName") or customer.get("full_name") or "").strip()[:160],
+        "email": str(customer.get("email") or "").strip()[:255],
+        "documentType": str(customer.get("documentType") or customer.get("document_type") or "").strip()[:30],
+        "documentNumber": str(customer.get("documentNumber") or customer.get("document_number") or "").strip()[:80],
+        "phone": str(customer.get("phone") or "").strip()[:30] or None,
     }
 
 
