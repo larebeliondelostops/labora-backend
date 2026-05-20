@@ -713,6 +713,20 @@ class PaymentService:
                 "order": self._order_payload(order) if order else None,
             },
         )
+        logger.warning(
+            "payment_flow_front_payload %s",
+            json.dumps(
+                {
+                    "traceId": trace_id,
+                    "caseId": str(case.id),
+                    "userId": str(user.id),
+                    "envPrice": configured_price,
+                    "response": _json_safe(response),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
         return response
 
     def _process_transaction(
