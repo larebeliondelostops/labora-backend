@@ -296,13 +296,6 @@ class PaywallPreviewService:
                 code="PAYWALL_ALREADY_UNLOCKED",
                 message="El analisis completo ya esta desbloqueado.",
             )
-        if preview.status == "requires_review" or preview.requires_human_review:
-            raise ApiError(
-                status_code=status.HTTP_423_LOCKED,
-                code="REVIEW_REQUIRED",
-                message="El expediente requiere revision interna antes de iniciar checkout.",
-                details={"caseId": str(case.id), "previewId": str(preview.id)},
-            )
         if return_url and not return_url.lower().startswith(("http://", "https://")):
             raise ApiError(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -911,11 +904,14 @@ class PaywallPreviewService:
             }
         if preview.status == "requires_review" or preview.requires_human_review:
             return {
-                "label": "Esperar revision interna",
-                "target": "review",
-                "checkoutUrl": None,
+                "label": "Desbloquear analisis completo",
+                "target": "checkout",
+                "checkoutUrl": paywall.checkout_url or f"/app/cases/{case.id}/checkout",
                 "priceLabel": paywall.price_label or PRICE_LABEL,
-                "disclaimer": "Este caso requiere revision antes de ofrecer el desbloqueo.",
+                "disclaimer": (
+                    "El pago desbloquea el analisis completo y el caso puede mantener"
+                    " validaciones internas adicionales."
+                ),
             }
         return {
             "label": "Desbloquear analisis completo",

@@ -211,7 +211,7 @@ def test_preview_blocks_foreign_user_missing_consent_and_missing_preanalysis(cli
     assert missing_preanalysis.json()["error"]["code"] == "PREANALYSIS_REQUIRED"
 
 
-def test_low_confidence_preview_requires_review_and_admin_can_approve(client_and_session) -> None:
+def test_low_confidence_preview_allows_checkout_and_admin_can_approve(client_and_session) -> None:
     client, session_factory = client_and_session
     user_id, headers = _create_user(session_factory)
     _grant_required_consents(session_factory, user_id)
@@ -230,7 +230,7 @@ def test_low_confidence_preview_requires_review_and_admin_can_approve(client_and
     data = viewed.json()
     assert data["status"] == "requires_review"
     assert data["summary"]["requiresHumanReview"] is True
-    assert data["cta"]["target"] == "review"
+    assert data["cta"]["target"] == "checkout"
     assert "LOW_CONFIDENCE_REVIEW" in {warning["code"] for warning in data["warnings"]}
 
     checkout = client.post(
@@ -238,8 +238,8 @@ def test_low_confidence_preview_requires_review_and_admin_can_approve(client_and
         json={"source": "preview_paywall"},
         headers=headers,
     )
-    assert checkout.status_code == 423
-    assert checkout.json()["error"]["code"] == "REVIEW_REQUIRED"
+    assert checkout.status_code == 201
+    assert checkout.json()["checkoutUrl"].startswith("http://localhost:3000/app/cases/")
 
     listed = client.get("/api/v1/admin/paywall-previews?status=requires_review", headers=admin_headers)
     assert listed.status_code == 200
@@ -260,6 +260,49 @@ def test_low_confidence_preview_requires_review_and_admin_can_approve(client_and
         assert db.get(LaboraCase, UUID(case_id)).status == "preview_locked"
     finally:
         db.close()
+
+
+def test_payment_checkout_allows_preview_requires_review_and_reuses_pending_payment(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(
+        session_factory,
+        user_id=user_id,
+        case_id=UUID(case_id),
+        status="requires_review",
+        confidence=Decimal("0.5500"),
+    )
+
+    order_response = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        headers=headers,
+    )
+    assert order_response.status_code == 201
+    order = order_response.json()["order"]
+
+    checkout_payload = {
+        "orderId": order["id"],
+        "paymentMethod": "CARD",
+        "customer": {
+            "fullName": "Maria Gomez",
+            "email": "maria@example.com",
+            "documentType": "CC",
+            "documentNumber": "52123456",
+            "phone": "3001112233",
+        },
+    }
+    checkout = client.post("/api/v1/payments/checkout", json=checkout_payload, headers=headers)
+    assert checkout.status_code == 201
+    payment = checkout.json()["payment"]
+    assert payment["status"] == "checkout_started"
+    assert payment["checkoutUrl"].startswith("http://localhost:3000/app/cases/")
+
+    resumed_checkout = client.post("/api/v1/payments/checkout", json=checkout_payload, headers=headers)
+    assert resumed_checkout.status_code == 201
+    assert resumed_checkout.json()["payment"]["id"] == payment["id"]
 
 
 def test_checkout_uses_epayco_apify_when_configured(client_and_session, monkeypatch) -> None:
