@@ -688,3 +688,4 @@ def test_refresh_endpoint_contract(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["data"]["accessToken"] == "new-access-token"
+    assert "labora_access_token=new-access-token" in response.headers["set-cookie"]

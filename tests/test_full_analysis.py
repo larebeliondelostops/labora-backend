@@ -1,15 +1,17 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 import app.models  # noqa: F401
 import pytest
 from fastapi.testclient import TestClient
+from jose import jwt
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base, get_db
+from app.core.config import settings
 from app.core.security import create_access_token
 from app.main import app
 from app.models.audit_event import AuditEvent
@@ -46,6 +48,15 @@ TITLES = {
     "electronic_means": "Medios electronicos",
     "ai_scope_acknowledgement": "Alcance IA",
 }
+
+FULL_ANALYSIS_READ_ENDPOINTS = [
+    "/api/v1/cases/{case_id}/full-analysis",
+    "/api/v1/cases/{case_id}/rules-results",
+    "/api/v1/cases/{case_id}/calculations",
+    "/api/v1/cases/{case_id}/full-analysis/scenarios",
+    "/api/v1/cases/{case_id}/full-analysis/inconsistencies",
+    "/api/v1/cases/{case_id}/full-analysis/confidence",
+]
 
 
 @pytest.fixture()
@@ -159,6 +170,62 @@ def test_full_analysis_runs_and_exposes_results(client_and_session) -> None:
         db.close()
 
 
+def test_full_analysis_read_routes_accept_same_valid_auth_cookie(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, _headers = _create_user(session_factory)
+    case_id = _create_case_row(session_factory, user_id, status="completed")
+    _create_completed_full_analysis(session_factory, user_id=user_id, case_id=UUID(case_id))
+    cookies = _auth_cookies(user_id)
+
+    for endpoint in FULL_ANALYSIS_READ_ENDPOINTS:
+        response = client.get(endpoint.format(case_id=case_id), cookies=cookies)
+
+        assert response.status_code == 200, endpoint
+
+
+def test_full_analysis_read_routes_reject_expired_auth_cookie_consistently(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, _headers = _create_user(session_factory)
+    case_id = _create_case_row(session_factory, user_id, status="completed")
+    _create_completed_full_analysis(session_factory, user_id=user_id, case_id=UUID(case_id))
+    cookies = {settings.auth_cookie_name: _expired_access_token(user_id)}
+
+    for endpoint in FULL_ANALYSIS_READ_ENDPOINTS:
+        response = client.get(endpoint.format(case_id=case_id), cookies=cookies)
+
+        assert response.status_code == 401, endpoint
+        assert response.json()["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_full_analysis_read_routes_require_payment_unlock(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, _headers = _create_user(session_factory)
+    case_id = _create_case_row(session_factory, user_id, status="preanalysis_ready")
+    _create_completed_full_analysis(session_factory, user_id=user_id, case_id=UUID(case_id))
+    cookies = _auth_cookies(user_id)
+
+    for endpoint in FULL_ANALYSIS_READ_ENDPOINTS:
+        response = client.get(endpoint.format(case_id=case_id), cookies=cookies)
+
+        assert response.status_code == 403, endpoint
+        assert response.json()["error"]["code"] == "PAYMENT_REQUIRED"
+
+
+def test_full_analysis_read_routes_block_foreign_user(client_and_session) -> None:
+    client, session_factory = client_and_session
+    owner_id, _owner_headers = _create_user(session_factory)
+    other_id, _other_headers = _create_user(session_factory)
+    case_id = _create_case_row(session_factory, owner_id, status="completed")
+    _create_completed_full_analysis(session_factory, user_id=owner_id, case_id=UUID(case_id))
+    cookies = _auth_cookies(other_id)
+
+    for endpoint in FULL_ANALYSIS_READ_ENDPOINTS:
+        response = client.get(endpoint.format(case_id=case_id), cookies=cookies)
+
+        assert response.status_code == 403, endpoint
+        assert response.json()["error"]["code"] == "CASE_ACCESS_DENIED"
+
+
 def test_full_analysis_requires_payment_unlock(client_and_session) -> None:
     client, session_factory = client_and_session
     user_id, headers = _create_user(session_factory)
@@ -169,7 +236,7 @@ def test_full_analysis_requires_payment_unlock(client_and_session) -> None:
 
     response = client.post(f"/api/v1/cases/{case_id}/full-analysis", headers=headers)
 
-    assert response.status_code == 402
+    assert response.status_code == 403
     assert response.json()["error"]["code"] == "PAYMENT_REQUIRED"
 
 
@@ -274,6 +341,24 @@ def _create_user(session_factory, *, role: str = "user"):
         return user.id, {"Authorization": f"Bearer {token}"}
     finally:
         db.close()
+
+
+def _auth_cookies(user_id: UUID, *, role: str = "user") -> dict[str, str]:
+    token = create_access_token(str(user_id), {"role": role, "sid": str(uuid4())})
+    return {settings.auth_cookie_name: token}
+
+
+def _expired_access_token(user_id: UUID, *, role: str = "user") -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "type": "access",
+        "role": role,
+        "sid": str(uuid4()),
+        "iat": now - timedelta(hours=2),
+        "exp": now - timedelta(hours=1),
+    }
+    return jwt.encode(payload, settings.jwt_access_secret, algorithm=settings.jwt_algorithm)
 
 
 def _grant_required_consents(session_factory, user_id: UUID) -> None:
@@ -639,6 +724,32 @@ def _create_active_full_analysis(session_factory, *, user_id: UUID, case_id: UUI
             input_snapshot={},
             created_at=now,
             updated_at=now,
+        )
+        db.add(item)
+        db.commit()
+        return str(item.id)
+    finally:
+        db.close()
+
+
+def _create_completed_full_analysis(session_factory, *, user_id: UUID, case_id: UUID) -> str:
+    db = session_factory()
+    now = utc_now()
+    try:
+        item = FullAnalysis(
+            case_id=case_id,
+            user_id=user_id,
+            status="completed",
+            version=1,
+            triggered_by_user_id=user_id,
+            triggered_by_role="user",
+            input_snapshot={},
+            executive_result={"currency": "COP", "summary": "Disponible"},
+            confidence_global=Decimal("85.00"),
+            requires_human_review=False,
+            created_at=now,
+            updated_at=now,
+            completed_at=now,
         )
         db.add(item)
         db.commit()

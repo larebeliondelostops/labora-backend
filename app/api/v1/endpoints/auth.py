@@ -250,13 +250,15 @@ def refresh_token(
     payload: RefreshTokenRequest,
     request: Request,
     db: Session = Depends(get_db),
-) -> dict:
+) -> JSONResponse:
     data = AccountAuthService(db).refresh(
         refresh_token=payload.refresh_token,
         ip_address=get_client_ip(request),
         user_agent=get_user_agent(request),
     )
-    return {"data": data}
+    response = JSONResponse({"data": data})
+    _set_auth_cookie(response, data["accessToken"])
+    return response
 
 
 @router.post("/logout", response_model=DataResponse)

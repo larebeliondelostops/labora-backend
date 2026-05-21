@@ -49,6 +49,7 @@ UNLOCKED_CASE_STATUSES = {
     "full_analysis_unlocked",
     "analysis_in_progress",
     "completed",
+    "requires_review",
 }
 READY_DOCUMENT_STATUSES = {"uploaded", "validated", "requires_review"}
 READY_DOCUMENT_VALIDATION_STATUSES = {"completed"}
@@ -216,6 +217,7 @@ class FullAnalysisService:
     ) -> dict[str, Any]:
         case = self._get_case_or_404(case_id)
         self._require_can_view(case, user, ip_address, user_agent)
+        self._require_unlocked(case)
         item = self.full_analysis.latest_for_case(case.id)
         if item is None:
             return self._not_started_payload(case)
@@ -390,6 +392,7 @@ class FullAnalysisService:
             )
         case = self._get_case_or_404(case_id)
         self._require_can_view(case, user, ip_address, user_agent)
+        self._require_unlocked(case)
         item = self.full_analysis.latest_for_case(case.id)
         if item is None:
             raise self._analysis_not_found(case.id)
@@ -628,12 +631,7 @@ class FullAnalysisService:
                 details={"caseId": str(case.id), "missingConsentTypes": permission.missing_consent_types},
             )
         if not self._case_is_unlocked(case):
-            raise ApiError(
-                status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                code="PAYMENT_REQUIRED",
-                message="El analisis completo requiere pago aprobado.",
-                details={"caseId": str(case.id)},
-            )
+            raise self._payment_required_error(case)
         documents = self._ready_documents(case.id)
         if not documents:
             self._raise_blocked(case=case, actor=actor, code="CASE_NOT_READY_FOR_FULL_ANALYSIS", blocked_reason="documents_not_ready", message="Faltan documentos procesados para el analisis completo.", ip_address=ip_address, user_agent=user_agent)
@@ -953,6 +951,7 @@ class FullAnalysisService:
     ) -> FullAnalysis:
         case = self._get_case_or_404(case_id)
         self._require_can_view(case, user, ip_address, user_agent)
+        self._require_unlocked(case)
         item = self.full_analysis.latest_for_case(case.id)
         if item is None:
             raise self._analysis_not_found(case.id)
@@ -1052,6 +1051,18 @@ class FullAnalysisService:
             paywall.status == "completed"
             or paywall.unlock_required is False
             or paywall.unlocked_at is not None
+        )
+
+    def _require_unlocked(self, case: LaboraCase) -> None:
+        if not self._case_is_unlocked(case):
+            raise self._payment_required_error(case)
+
+    def _payment_required_error(self, case: LaboraCase) -> ApiError:
+        return ApiError(
+            status_code=status.HTTP_403_FORBIDDEN,
+            code="PAYMENT_REQUIRED",
+            message="El analisis completo requiere pago aprobado.",
+            details={"caseId": str(case.id)},
         )
 
     def _ready_documents(self, case_id: uuid.UUID) -> list[Document]:
