@@ -14,7 +14,7 @@ from app.core.database import Base, get_db
 from app.core.security import create_access_token
 from app.main import app
 from app.models.audit_event import AuditEvent
-from app.models.case import CaseOwner, CaseStatusHistory, LaboraCase
+from app.models.case import CaseHistoryEvent, CaseOwner, CaseStatusHistory, LaboraCase
 from app.models.consent import LegalDocument, UserConsent
 from app.models.paywall import ConversionEvent, LockedFeature, Paywall, PreviewResult
 from app.models.payment import Order, Payment, PaymentTransaction, Receipt, UnlockEvent
@@ -114,7 +114,7 @@ def test_owner_can_generate_view_checkout_and_track_paywall(client_and_session) 
         )
         case = db.get(LaboraCase, UUID(case_id))
         case.status = "paid_unlocked"
-        case.current_step = "analysis_unlocked"
+        case.current_step = "analysis"
         case.next_best_action = "start_full_analysis"
         db.commit()
     finally:
@@ -451,16 +451,38 @@ def test_epayco_confirmation_unlocks_paywall_with_valid_signature(
 
     assert response.status_code == 200
     assert response.json()["accepted"] is True
+    duplicate = client.post(
+        "/api/v1/payments/epayco/confirmation",
+        json={
+            "x_cust_id_cliente": "cust123",
+            "x_ref_payco": "ref-001",
+            "x_transaction_id": "tx-001",
+            "x_amount": "150000.00",
+            "x_currency_code": "COP",
+            "x_id_invoice": invoice,
+            "x_cod_response": "1",
+            "x_response": "Aceptada",
+            "x_signature": signature,
+        },
+    )
+    assert duplicate.status_code == 200
+    assert duplicate.json()["accepted"] is True
     db = session_factory()
     try:
         case = db.get(LaboraCase, UUID(case_id))
         paywall = db.query(Paywall).one()
         event_names = {event.event_name for event in db.query(ConversionEvent).all()}
         assert case.status == "paid_unlocked"
+        assert case.current_step == "analysis"
+        assert case.next_best_action == "start_full_analysis"
         assert paywall.status == "completed"
         assert paywall.unlock_required is False
         assert paywall.unlocked_at is not None
         assert {"checkout_returned", "unlock_completed"} <= event_names
+        history = db.query(CaseHistoryEvent).filter(CaseHistoryEvent.case_id == case.id).all()
+        titles = [event.title for event in history]
+        assert titles.count("Pago aprobado") == 1
+        assert titles.count("Analisis desbloqueado") == 1
     finally:
         db.close()
 
@@ -595,10 +617,17 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
     unlocked_flow = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
     assert unlocked_flow.status_code == 200
     unlocked_data = unlocked_flow.json()["paymentFlow"]
-    assert unlocked_data["caseStatus"] == "full_analysis_unlocked"
+    assert unlocked_data["caseStatus"] == "paid_unlocked"
     assert unlocked_data["isUnlocked"] is True
     assert unlocked_data["canContinue"] is True
     assert unlocked_data["canPay"] is False
+
+    case_detail = client.get(f"/api/v1/cases/{case_id}", headers=headers)
+    assert case_detail.status_code == 200
+    assert case_detail.json()["status"] == "paid_unlocked"
+    assert case_detail.json()["currentStep"] == "analysis"
+    assert case_detail.json()["nextBestAction"] == "start_full_analysis"
+    assert "start_full_analysis" in case_detail.json()["allowedActions"]
 
     receipt = client.get(f"/api/v1/orders/{order['id']}/receipt", headers=headers)
     assert receipt.status_code == 200
@@ -608,15 +637,101 @@ def test_payment_order_checkout_webhook_unlocks_idempotently(client_and_session)
     try:
         case = db.get(LaboraCase, UUID(case_id))
         stored_payment = db.get(Payment, UUID(payment["id"]))
-        assert case.status == "full_analysis_unlocked"
+        assert case.status == "paid_unlocked"
+        assert case.current_step == "analysis"
+        assert case.next_best_action == "start_full_analysis"
         assert db.get(Order, UUID(order["id"])).status == "paid"
         assert stored_payment.status == "approved"
         assert db.query(PaymentTransaction).count() == 1
         assert db.query(UnlockEvent).count() == 1
         assert db.query(Receipt).count() == 1
+        history = db.query(CaseHistoryEvent).filter(CaseHistoryEvent.case_id == case.id).all()
+        titles = [event.title for event in history]
+        assert titles.count("Pago aprobado") == 1
+        assert titles.count("Analisis desbloqueado") == 1
         audit_names = {event.event_type for event in db.query(AuditEvent).all()}
         assert "pago_desbloqueo.approved" in audit_names
         assert "pago_desbloqueo.unlocked" in audit_names
+    finally:
+        db.close()
+
+
+def test_payment_flow_repairs_approved_payment_with_locked_case(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    _grant_required_consents(session_factory, user_id)
+    case_id = _create_case_row(session_factory, user_id)
+    _create_pre_analysis_row(session_factory, user_id=user_id, case_id=UUID(case_id))
+
+    order_response = client.post(
+        f"/api/v1/cases/{case_id}/orders",
+        json={"productCode": "FULL_ANALYSIS_UNLOCK"},
+        headers=headers,
+    )
+    order = order_response.json()["order"]
+    checkout = client.post(
+        "/api/v1/payments/checkout",
+        json={
+            "orderId": order["id"],
+            "paymentMethod": "CARD",
+            "customer": {
+                "fullName": "Maria Gomez",
+                "email": "maria@example.com",
+                "documentType": "CC",
+                "documentNumber": "52123456",
+                "phone": "3001112233",
+            },
+        },
+        headers=headers,
+    )
+    payment = checkout.json()["payment"]
+
+    db = session_factory()
+    now = utc_now()
+    try:
+        stored_order = db.get(Order, UUID(order["id"]))
+        stored_payment = db.get(Payment, UUID(payment["id"]))
+        stored_case = db.get(LaboraCase, UUID(case_id))
+        stored_order.status = "paid"
+        stored_order.paid_at = now
+        stored_payment.status = "approved"
+        stored_payment.provider_payment_id = "ref-already-approved"
+        stored_payment.provider_status = "Aceptada"
+        stored_payment.approved_at = now
+        stored_case.status = "payment_pending"
+        stored_case.current_step = "payment_pending"
+        stored_case.next_best_action = "wait_payment_confirmation"
+        db.commit()
+    finally:
+        db.close()
+
+    flow_response = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
+    assert flow_response.status_code == 200
+    flow = flow_response.json()["paymentFlow"]
+    assert flow["caseStatus"] == "paid_unlocked"
+    assert flow["isUnlocked"] is True
+    assert flow["canContinue"] is True
+    assert flow["payment"]["status"] == "approved"
+
+    case_detail = client.get(f"/api/v1/cases/{case_id}", headers=headers)
+    assert case_detail.status_code == 200
+    assert case_detail.json()["status"] == "paid_unlocked"
+    assert case_detail.json()["currentStep"] == "analysis"
+    assert "start_full_analysis" in case_detail.json()["allowedActions"]
+
+    repeated_flow = client.get(f"/api/v1/cases/{case_id}/payment-flow", headers=headers)
+    assert repeated_flow.status_code == 200
+
+    db = session_factory()
+    try:
+        case = db.get(LaboraCase, UUID(case_id))
+        assert case.status == "paid_unlocked"
+        assert db.query(UnlockEvent).count() == 1
+        assert db.query(Receipt).count() == 1
+        history = db.query(CaseHistoryEvent).filter(CaseHistoryEvent.case_id == case.id).all()
+        titles = [event.title for event in history]
+        assert titles.count("Pago aprobado") == 1
+        assert titles.count("Analisis desbloqueado") == 1
     finally:
         db.close()
 
@@ -685,7 +800,7 @@ def test_payment_flow_reconciles_epayco_return_reference(client_and_session, mon
 
     assert flow_response.status_code == 200
     flow = flow_response.json()["paymentFlow"]
-    assert flow["caseStatus"] == "full_analysis_unlocked"
+    assert flow["caseStatus"] == "paid_unlocked"
     assert flow["isUnlocked"] is True
     assert flow["canContinue"] is True
     assert flow["canPay"] is False
@@ -697,7 +812,7 @@ def test_payment_flow_reconciles_epayco_return_reference(client_and_session, mon
         case = db.get(LaboraCase, UUID(case_id))
         stored_order = db.get(Order, UUID(order["id"]))
         stored_payment = db.get(Payment, UUID(payment["id"]))
-        assert case.status == "full_analysis_unlocked"
+        assert case.status == "paid_unlocked"
         assert stored_order.status == "paid"
         assert stored_payment.status == "approved"
         assert stored_payment.provider_payment_id == "ref-return-001"

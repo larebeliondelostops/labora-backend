@@ -1261,7 +1261,7 @@ def allowed_actions_for_status(status_value: str) -> list[str]:
     elif status_value in {"payment_approved", "full_analysis_unlocked"}:
         actions.extend(["view_preanalysis", "start_full_analysis", "close_case"])
     elif status_value == "paid_unlocked":
-        actions.extend(["view_preanalysis", "close_case"])
+        actions.extend(["view_preanalysis", "start_full_analysis", "close_case"])
     elif status_value == "analysis_in_progress":
         actions.extend(["view_preanalysis"])
     elif status_value == "completed":

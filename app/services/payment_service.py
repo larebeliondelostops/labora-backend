@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.api_errors import ApiError
 from app.core.config import settings
-from app.models.case import LaboraCase
+from app.models.case import CaseHistoryEvent, LaboraCase
 from app.models.paywall import Paywall, PreviewResult
 from app.models.payment import Order, Payment, PaymentTransaction, Receipt
 from app.models.user import User
@@ -22,7 +22,11 @@ from app.repositories.audit_event_repository import AuditEventRepository
 from app.repositories.case_repository import CaseRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.paywall_repository import PaywallRepository
-from app.services.case_state_machine import step_for_status, validate_case_transition
+from app.services.case_state_machine import (
+    CASE_STATUS_TRANSITIONS,
+    step_for_status,
+    validate_case_transition,
+)
 from app.services.consent_service import ConsentComplianceService
 from app.services.epayco_service import (
     EpaycoCheckoutClient,
@@ -547,6 +551,8 @@ class PaymentService:
             provider_event_id=provider_event.provider_event_id,
         )
         if existing is not None:
+            if existing.normalized_status == "approved":
+                self._repair_approved_duplicate_transaction(existing)
             self._audit(
                 "pago_desbloqueo.updated",
                 actor=None,
@@ -754,6 +760,14 @@ class PaymentService:
                 ip_address=ip_address,
                 user_agent=user_agent,
             )
+        if order is not None and payment is not None:
+            self._ensure_approved_payment_consistency(
+                case=case,
+                order=order,
+                payment=payment,
+            )
+            if payment.status == "approved" and order.status == "paid":
+                self.db.commit()
         receipt = self.payments.receipt_for_order(order.id) if order else None
         is_unlocked = self._case_is_unlocked(case)
         payment_status = payment.status if payment else None
@@ -773,7 +787,7 @@ class PaymentService:
         response = {
             "paymentFlow": {
                 "caseId": str(case.id),
-                "caseStatus": self._case_payment_status(case, payment),
+                "caseStatus": case.status if is_unlocked else self._case_payment_status(case, payment),
                 "canPay": can_pay,
                 "canRetry": can_retry,
                 "canContinue": is_unlocked,
@@ -942,6 +956,11 @@ class PaymentService:
             provider_event_id=provider_event.provider_event_id,
         )
         if existing is not None:
+            self._ensure_approved_payment_consistency(
+                case=case,
+                order=order,
+                payment=payment,
+            )
             self.db.commit()
             return payment, order
 
@@ -1117,6 +1136,12 @@ class PaymentService:
         previous_order = self._order_state(order)
         previous_payment = self._payment_state(payment)
         if payment.status == "approved" and order.status == "paid":
+            self._ensure_approved_payment_consistency(
+                case=case,
+                order=order,
+                payment=payment,
+                previous_case_status=case.status,
+            )
             transaction.processed = True
             transaction.processed_at = now
             return
@@ -1145,12 +1170,10 @@ class PaymentService:
             return
 
         previous_case_status = case.status
-        self._set_case_status(
+        self._move_case_after_payment_approval(
             case,
-            new_status="payment_approved",
-            reason="Pago aprobado por webhook del proveedor.",
-            source_module="payments",
-            metadata={"orderId": str(order.id), "paymentId": str(payment.id)},
+            order=order,
+            payment=payment,
         )
         unlock_event = self._unlock_full_analysis(
             case=case,
@@ -1159,6 +1182,12 @@ class PaymentService:
             previous_case_status=previous_case_status,
         )
         receipt = self._ensure_receipt(order=order, payment=payment)
+        self._record_payment_unlock_history(
+            case=case,
+            order=order,
+            payment=payment,
+            unlock_event=unlock_event,
+        )
         transaction.payment_id = payment.id
         transaction.order_id = order.id
         transaction.processed = True
@@ -1280,9 +1309,20 @@ class PaymentService:
     ):
         existing = self.payments.unlock_event_for_payment(payment.id)
         if existing is not None:
+            was_unlocked = self._case_is_unlocked(case)
+            if not was_unlocked:
+                self._set_case_status(
+                    case,
+                    new_status="paid_unlocked",
+                    reason="Analisis completo desbloqueado por pago aprobado.",
+                    source_module="payments",
+                    metadata={"orderId": str(order.id), "paymentId": str(payment.id)},
+                )
+                existing.new_case_status = case.status
+            self._complete_paywall_unlock(order=order, payment=payment)
             if existing.status == "completed":
                 return existing
-            existing.status = "skipped_already_unlocked" if self._case_is_unlocked(case) else "completed"
+            existing.status = "skipped_already_unlocked" if was_unlocked else "completed"
             existing.completed_at = existing.completed_at or utc_now()
             return existing
 
@@ -1290,17 +1330,12 @@ class PaymentService:
         if not self._case_is_unlocked(case):
             self._set_case_status(
                 case,
-                new_status="full_analysis_unlocked",
+                new_status="paid_unlocked",
                 reason="Analisis completo desbloqueado por pago aprobado.",
                 source_module="payments",
                 metadata={"orderId": str(order.id), "paymentId": str(payment.id)},
             )
-        paywall = self._paywall_for_order(order)
-        paywall.status = "completed"
-        paywall.unlock_required = False
-        paywall.unlocked_at = paywall.unlocked_at or now
-        paywall.unlocked_by_payment_id = payment.id
-        paywall.updated_at = now
+        self._complete_paywall_unlock(order=order, payment=payment, now=now)
         return self.payments.create_unlock_event(
             case_id=case.id,
             user_id=order.user_id,
@@ -1313,6 +1348,147 @@ class PaymentService:
             reason="Pago aprobado por proveedor.",
             created_at=now,
             completed_at=now,
+        )
+
+    def _ensure_approved_payment_consistency(
+        self,
+        *,
+        case: LaboraCase,
+        order: Order,
+        payment: Payment,
+        previous_case_status: str | None = None,
+    ) -> tuple[Any | None, Receipt | None]:
+        if payment.status != "approved" or order.status != "paid":
+            return None, None
+        if order.product_code == "PROFESSIONAL_REVIEW":
+            return None, self._ensure_receipt(order=order, payment=payment)
+
+        original_case_status = previous_case_status or case.status
+        self._move_case_after_payment_approval(case, order=order, payment=payment)
+        unlock_event = self._unlock_full_analysis(
+            case=case,
+            order=order,
+            payment=payment,
+            previous_case_status=original_case_status,
+        )
+        receipt = self._ensure_receipt(order=order, payment=payment)
+        self._record_payment_unlock_history(
+            case=case,
+            order=order,
+            payment=payment,
+            unlock_event=unlock_event,
+        )
+        return unlock_event, receipt
+
+    def _complete_paywall_unlock(
+        self,
+        *,
+        order: Order,
+        payment: Payment,
+        now: datetime | None = None,
+    ) -> None:
+        now = now or utc_now()
+        paywall = self._paywall_for_order(order)
+        paywall.status = "completed"
+        paywall.unlock_required = False
+        paywall.unlocked_at = paywall.unlocked_at or now
+        paywall.unlocked_by_payment_id = payment.id
+        paywall.updated_at = now
+
+    def _move_case_after_payment_approval(
+        self,
+        case: LaboraCase,
+        *,
+        order: Order,
+        payment: Payment,
+    ) -> None:
+        if self._case_is_unlocked(case) or case.status == "payment_approved":
+            return
+        new_status = (
+            "payment_approved"
+            if "payment_approved" in CASE_STATUS_TRANSITIONS.get(case.status, set())
+            else "paid_unlocked"
+        )
+        self._set_case_status(
+            case,
+            new_status=new_status,
+            reason="Pago aprobado por webhook del proveedor.",
+            source_module="payments",
+            metadata={"orderId": str(order.id), "paymentId": str(payment.id)},
+        )
+
+    def _repair_approved_duplicate_transaction(self, transaction: PaymentTransaction) -> None:
+        payment = transaction.payment
+        order = payment.order if payment is not None else self.payments.get_order(transaction.order_id)
+        if payment is None and order is not None:
+            payment = self.payments.latest_payment_for_order(order.id)
+        if payment is None or order is None:
+            return
+        case = self.cases.get(order.case_id)
+        if case is None:
+            return
+        self._ensure_approved_payment_consistency(case=case, order=order, payment=payment)
+
+    def _record_payment_unlock_history(
+        self,
+        *,
+        case: LaboraCase,
+        order: Order,
+        payment: Payment,
+        unlock_event: Any,
+    ) -> None:
+        metadata = {
+            "orderId": str(order.id),
+            "paymentId": str(payment.id),
+            "provider": payment.provider,
+        }
+        self._record_case_history_event_once(
+            case=case,
+            event_type="payment.approved",
+            title="Pago aprobado",
+            description="El proveedor confirmo el pago del desbloqueo.",
+            severity="success",
+            metadata=metadata,
+        )
+        self._record_case_history_event_once(
+            case=case,
+            event_type="case.analysis_unlocked",
+            title="Analisis desbloqueado",
+            description="El expediente quedo listo para iniciar el analisis completo.",
+            severity="success",
+            metadata={**metadata, "unlockEventId": str(unlock_event.id)},
+        )
+
+    def _record_case_history_event_once(
+        self,
+        *,
+        case: LaboraCase,
+        event_type: str,
+        title: str,
+        description: str,
+        severity: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        existing_events = (
+            self.db.query(CaseHistoryEvent)
+            .filter(
+                CaseHistoryEvent.case_id == case.id,
+                CaseHistoryEvent.event_type == event_type,
+            )
+            .all()
+        )
+        payment_id = metadata.get("paymentId")
+        if any((event.metadata_json or {}).get("paymentId") == payment_id for event in existing_events):
+            return
+        self.cases.create_history_event(
+            case_id=case.id,
+            event_type=event_type,
+            title=title,
+            description=description,
+            visibility="both",
+            severity=severity,
+            created_by_user_id=None,
+            metadata=_json_safe(metadata),
         )
 
     def _mark_requires_review(

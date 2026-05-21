@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.api_errors import ApiError
 from app.core.config import settings
-from app.models.case import LaboraCase
+from app.models.case import CaseHistoryEvent, LaboraCase
 from app.models.paywall import Paywall, PreviewResult
 from app.models.pre_analysis import PreAnalysis
 from app.models.user import User
@@ -481,6 +481,23 @@ class PaywallPreviewService:
                 case_id=case.id,
                 user_id=paywall.user_id,
                 metadata=_epayco_public_metadata(payload),
+            )
+            confirmation_metadata = _epayco_public_metadata(payload)
+            self._record_system_history_event_once(
+                case=case,
+                event_type="payment.approved",
+                title="Pago aprobado",
+                description="ePayco confirmo el pago del desbloqueo.",
+                severity="success",
+                metadata=confirmation_metadata,
+            )
+            self._record_system_history_event_once(
+                case=case,
+                event_type="case.analysis_unlocked",
+                title="Analisis desbloqueado",
+                description="El expediente quedo listo para iniciar el analisis completo.",
+                severity="success",
+                metadata=confirmation_metadata,
             )
             self._audit(
                 PAYWALL_EVENTS["updated"],
@@ -1063,6 +1080,50 @@ class PaywallPreviewService:
             severity=severity,
             created_by_user_id=actor.id,
             metadata=_json_safe(metadata) if metadata else None,
+        )
+
+    def _record_system_history_event_once(
+        self,
+        *,
+        case: LaboraCase,
+        event_type: str,
+        title: str,
+        description: str,
+        severity: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        reference = (
+            metadata.get("refPayco")
+            or metadata.get("transactionId")
+            or metadata.get("invoice")
+        )
+        existing_events = (
+            self.db.query(CaseHistoryEvent)
+            .filter(
+                CaseHistoryEvent.case_id == case.id,
+                CaseHistoryEvent.event_type == event_type,
+            )
+            .all()
+        )
+        if any(
+            (
+                (event.metadata_json or {}).get("refPayco")
+                or (event.metadata_json or {}).get("transactionId")
+                or (event.metadata_json or {}).get("invoice")
+            )
+            == reference
+            for event in existing_events
+        ):
+            return
+        self.cases.create_history_event(
+            case_id=case.id,
+            event_type=event_type,
+            title=title,
+            description=description,
+            visibility="both",
+            severity=severity,
+            created_by_user_id=None,
+            metadata=_json_safe(metadata),
         )
 
     def _transition_case(
