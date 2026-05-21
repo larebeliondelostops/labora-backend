@@ -90,6 +90,18 @@ FULL_ANALYSIS_EVENTS = {
     "retried": "analisis_completo.retried",
 }
 
+RULE_RESULTS_FILTER_TO_RESULT = {
+    "applied": "passed",
+    "warnings": "warning",
+    "not_applicable": "not_applicable",
+    "inconclusive": "inconclusive",
+}
+SUPPORTED_RULE_RESULTS_FILTERS = {
+    "all",
+    "requires_review",
+    *RULE_RESULTS_FILTER_TO_RESULT.keys(),
+}
+
 
 class FullAnalysisService:
     def __init__(self, db: Session) -> None:
@@ -238,6 +250,7 @@ class FullAnalysisService:
         case_id: str,
         *,
         category: str | None,
+        filter_value: str | None,
         result: str | None,
         requires_review: bool | None,
         page: int,
@@ -247,6 +260,11 @@ class FullAnalysisService:
         user_agent: str | None,
     ) -> dict[str, Any]:
         item = self._latest_analysis_for_access(case_id, user, ip_address, user_agent)
+        result, requires_review = _apply_rule_results_filter(
+            filter_value,
+            result=result,
+            requires_review=requires_review,
+        )
         rows, total = self.full_analysis.list_rule_results(
             full_analysis_id=item.id,
             category=category,
@@ -255,7 +273,10 @@ class FullAnalysisService:
             page=page,
             limit=limit,
         )
-        return {"items": [self._rule_payload(row) for row in rows], "pagination": {"page": page, "limit": limit, "total": total}}
+        return {
+            "items": [self._rule_payload(row) for row in rows],
+            "pagination": {"page": page, "limit": limit, "pageSize": limit, "total": total},
+        }
 
     def list_calculations(
         self,
@@ -275,7 +296,10 @@ class FullAnalysisService:
             page=page,
             limit=limit,
         )
-        return {"items": [self._calculation_payload(row) for row in rows], "pagination": {"page": page, "limit": limit, "total": total}}
+        return {
+            "items": [self._calculation_payload(row) for row in rows],
+            "pagination": {"page": page, "limit": limit, "pageSize": limit, "total": total},
+        }
 
     def list_scenarios(
         self,
@@ -1663,6 +1687,27 @@ def _step(
     else:
         step_status = "pending"
     return {"key": key, "label": label, "status": step_status}
+
+
+def _apply_rule_results_filter(
+    filter_value: str | None,
+    *,
+    result: str | None,
+    requires_review: bool | None,
+) -> tuple[str | None, bool | None]:
+    normalized = (filter_value or "").strip().lower()
+    if not normalized or normalized == "all":
+        return result, requires_review
+    if normalized not in SUPPORTED_RULE_RESULTS_FILTERS:
+        raise ApiError(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="RULE_RESULTS_FILTER_INVALID",
+            message="Filtro de reglas no soportado.",
+            details={"supportedFilters": sorted(SUPPORTED_RULE_RESULTS_FILTERS)},
+        )
+    if normalized == "requires_review":
+        return result, True
+    return RULE_RESULTS_FILTER_TO_RESULT[normalized], requires_review
 
 
 def _rule_refs(rules: list[dict[str, Any]], codes: set[str]) -> list[dict[str, Any]]:

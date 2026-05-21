@@ -197,6 +197,80 @@ def test_full_analysis_read_routes_reject_expired_auth_cookie_consistently(clien
         assert response.json()["error"]["code"] == "UNAUTHORIZED"
 
 
+@pytest.mark.parametrize(
+    ("filter_value", "expected_codes"),
+    [
+        ("all", {"RULE_PASSED", "RULE_WARNING", "RULE_NOT_APPLICABLE", "RULE_INCONCLUSIVE", "RULE_REVIEW"}),
+        ("", {"RULE_PASSED", "RULE_WARNING", "RULE_NOT_APPLICABLE", "RULE_INCONCLUSIVE", "RULE_REVIEW"}),
+        ("applied", {"RULE_PASSED"}),
+        ("warnings", {"RULE_WARNING", "RULE_REVIEW"}),
+        ("not_applicable", {"RULE_NOT_APPLICABLE"}),
+        ("inconclusive", {"RULE_INCONCLUSIVE"}),
+        ("requires_review", {"RULE_REVIEW"}),
+    ],
+)
+def test_rule_results_filter_tabs_return_filtered_totals(
+    client_and_session,
+    filter_value: str,
+    expected_codes: set[str],
+) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    case_id = _create_case_row(session_factory, user_id, status="completed")
+    full_analysis_id = _create_completed_full_analysis(session_factory, user_id=user_id, case_id=UUID(case_id))
+    _create_rule_result_rows(session_factory, full_analysis_id=UUID(full_analysis_id), case_id=UUID(case_id))
+
+    response = client.get(
+        f"/api/v1/cases/{case_id}/rules-results",
+        params={"filter": filter_value, "page": 1, "pageSize": 20},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert {item["ruleCode"] for item in payload["items"]} == expected_codes
+    assert payload["pagination"]["total"] == len(expected_codes)
+    assert payload["pagination"]["page"] == 1
+    assert payload["pagination"]["pageSize"] == 20
+
+
+def test_rule_results_filter_paginates_after_filtering(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    case_id = _create_case_row(session_factory, user_id, status="completed")
+    full_analysis_id = _create_completed_full_analysis(session_factory, user_id=user_id, case_id=UUID(case_id))
+    _create_rule_result_rows(session_factory, full_analysis_id=UUID(full_analysis_id), case_id=UUID(case_id))
+
+    response = client.get(
+        f"/api/v1/cases/{case_id}/rules-results",
+        params={"filter": "warnings", "page": 2, "pageSize": 1},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["items"]) == 1
+    assert payload["items"][0]["result"] == "warning"
+    assert payload["pagination"] == {"page": 2, "limit": 1, "pageSize": 1, "total": 2}
+
+
+def test_rule_results_filter_rejects_unsupported_value(client_and_session) -> None:
+    client, session_factory = client_and_session
+    user_id, headers = _create_user(session_factory)
+    case_id = _create_case_row(session_factory, user_id, status="completed")
+    full_analysis_id = _create_completed_full_analysis(session_factory, user_id=user_id, case_id=UUID(case_id))
+    _create_rule_result_rows(session_factory, full_analysis_id=UUID(full_analysis_id), case_id=UUID(case_id))
+
+    response = client.get(
+        f"/api/v1/cases/{case_id}/rules-results",
+        params={"filter": "unsupported"},
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "RULE_RESULTS_FILTER_INVALID"
+
+
 def test_full_analysis_read_routes_require_payment_unlock(client_and_session) -> None:
     client, session_factory = client_and_session
     user_id, _headers = _create_user(session_factory)
@@ -754,5 +828,41 @@ def _create_completed_full_analysis(session_factory, *, user_id: UUID, case_id: 
         db.add(item)
         db.commit()
         return str(item.id)
+    finally:
+        db.close()
+
+
+def _create_rule_result_rows(session_factory, *, full_analysis_id: UUID, case_id: UUID) -> None:
+    db = session_factory()
+    now = utc_now()
+    rows = [
+        ("RULE_PASSED", "Regla aplicada", "passed", False),
+        ("RULE_WARNING", "Regla con alerta", "warning", False),
+        ("RULE_NOT_APPLICABLE", "Regla no aplicable", "not_applicable", False),
+        ("RULE_INCONCLUSIVE", "Regla inconclusa", "inconclusive", False),
+        ("RULE_REVIEW", "Regla para revision", "warning", True),
+    ]
+    try:
+        for rule_code, rule_name, result, requires_review in rows:
+            db.add(
+                LegalRuleResult(
+                    full_analysis_id=full_analysis_id,
+                    case_id=case_id,
+                    rule_code=rule_code,
+                    rule_name=rule_name,
+                    rule_version="v1",
+                    rule_category="eligibility",
+                    input_facts={},
+                    source_refs=[],
+                    condition_expression=None,
+                    result=result,
+                    result_detail={},
+                    explanation=f"Resultado {result}",
+                    confidence=Decimal("90.00"),
+                    requires_review=requires_review,
+                    created_at=now,
+                )
+            )
+        db.commit()
     finally:
         db.close()

@@ -91,21 +91,25 @@ def get_rule_results(
     case_id: str,
     request: Request,
     category: Annotated[str | None, Query()] = None,
+    filter_value: Annotated[str | None, Query(alias="filter")] = None,
     result: Annotated[str | None, Query()] = None,
     requires_review: Annotated[bool | None, Query(alias="requiresReview")] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    page_size: Annotated[int | None, Query(alias="pageSize", ge=1, le=100)] = None,
     context=Depends(get_current_user_context),
     db: Session = Depends(get_db),
 ) -> dict:
     user, _token_payload = context
+    effective_limit = page_size or limit
     return FullAnalysisService(db).list_rule_results(
         case_id,
         category=category,
+        filter_value=filter_value,
         result=result,
         requires_review=requires_review,
         page=page,
-        limit=limit,
+        limit=effective_limit,
         user=user,
         ip_address=get_client_ip(request),
         user_agent=get_user_agent(request),

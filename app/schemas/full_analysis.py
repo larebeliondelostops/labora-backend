@@ -94,8 +94,11 @@ class FullAnalysisResultResponse(BaseModel):
 
 
 class PaginationDto(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     page: int
     limit: int
+    page_size: int = Field(alias="pageSize")
     total: int
 
 
