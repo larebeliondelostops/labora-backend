@@ -1246,6 +1246,26 @@ def allowed_actions_for_status(status_value: str) -> list[str]:
         actions.extend(["edit_case", "upload_documents", "close_case"])
     elif status_value in {"documents_uploaded", "preanalysis_pending"}:
         actions.extend(["view_documents", "start_preanalysis", "close_case"])
+    elif status_value == "document_validation_running":
+        actions.extend(["view_documents", "close_case"])
+    elif status_value == "document_validation_failed":
+        actions.extend(["view_documents", "upload_documents", "close_case"])
+    elif status_value == "extraction_running":
+        actions.extend(["view_documents", "view_extraction_status", "close_case"])
+    elif status_value == "extraction_review_required":
+        actions.extend(["review_extraction", "run_pension_simulation", "close_case"])
+    elif status_value == "assumptions_required":
+        actions.extend(["complete_assumptions", "run_pension_simulation", "close_case"])
+    elif status_value == "pension_simulation_running":
+        actions.extend(["view_documents", "close_case"])
+    elif status_value == "pension_simulation_ready":
+        actions.extend(["view_pension_simulation", "view_legal_route", "close_case"])
+    elif status_value == "pension_simulation_failed":
+        actions.extend(["complete_assumptions", "retry_pension_simulation", "close_case"])
+    elif status_value == "legal_route_suggested":
+        actions.extend(["view_pension_simulation", "view_legal_route", "unlock_legal_document", "close_case"])
+    elif status_value == "legal_document_paywall":
+        actions.extend(["view_pension_simulation", "unlock_legal_document", "close_case"])
     elif status_value == "preanalysis_ready":
         actions.extend(["view_documents", "view_preanalysis", "close_case"])
     elif status_value == "preview_locked":
@@ -1264,6 +1284,18 @@ def allowed_actions_for_status(status_value: str) -> list[str]:
         actions.extend(["view_preanalysis", "start_full_analysis", "close_case"])
     elif status_value == "analysis_in_progress":
         actions.extend(["view_preanalysis"])
+    elif status_value == "template_selection_required":
+        actions.extend(["select_legal_template", "close_case"])
+    elif status_value == "legal_draft_running":
+        actions.extend(["view_legal_draft_status"])
+    elif status_value == "legal_draft_review_required":
+        actions.extend(["request_professional_review", "close_case"])
+    elif status_value == "legal_draft_ready":
+        actions.extend(["download_legal_draft", "request_professional_review", "close_case"])
+    elif status_value == "professional_review_requested":
+        actions.extend(["view_professional_review_status", "close_case"])
+    elif status_value == "delivered":
+        actions.extend(["view_delivery", "close_case"])
     elif status_value == "completed":
         actions.extend(["view_report", "generate_legal_action"])
     elif status_value == "requires_review":

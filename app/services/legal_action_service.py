@@ -38,6 +38,7 @@ from app.models.legal_action import (
     LegalTemplate,
 )
 from app.models.paywall import Paywall
+from app.models.pension import CaseEntitlement
 from app.models.report import Report
 from app.models.user import User
 from app.repositories.audit_event_repository import AuditEventRepository
@@ -1588,6 +1589,17 @@ class LegalActionService:
 
     def _case_is_unlocked(self, case: LaboraCase) -> bool:
         if case.status in READY_CASE_STATUSES:
+            return True
+        entitlement = (
+            self.db.query(CaseEntitlement.id)
+            .filter(
+                CaseEntitlement.case_id == case.id,
+                CaseEntitlement.entitlement == "legal_draft_generation",
+                CaseEntitlement.active.is_(True),
+            )
+            .first()
+        )
+        if entitlement is not None:
             return True
         order = self.payments.latest_order_for_case(case_id=case.id, product_code="FULL_ANALYSIS_UNLOCK")
         if order is not None and order.status == "paid":

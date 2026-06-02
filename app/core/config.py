@@ -118,6 +118,7 @@ class Settings(BaseSettings):
     PAYMENT_ORDER_EXPIRATION_MINUTES: int = 60
     PAYMENT_CURRENCY: str = "COP"
     FULL_ANALYSIS_UNLOCK_PRICE_COP: int = 150000
+    LEGAL_DRAFT_GENERATION_PRICE_COP: int = 150000
     PAYMENT_WEBHOOK_RATE_LIMIT_PER_MINUTE: int = 60
 
     DELIVERY_SHARE_BASE_URL: str = "https://labora.centralspike.com/share/delivery"
@@ -521,6 +522,10 @@ class Settings(BaseSettings):
     @property
     def full_analysis_unlock_price_cop(self) -> int:
         return max(self.FULL_ANALYSIS_UNLOCK_PRICE_COP, 0)
+
+    @property
+    def legal_draft_generation_price_cop(self) -> int:
+        return max(self.LEGAL_DRAFT_GENERATION_PRICE_COP, 0)
 
     @property
     def payment_webhook_rate_limit_per_minute(self) -> int:

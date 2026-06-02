@@ -4,7 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-ProductCode = Literal["FULL_ANALYSIS_UNLOCK"]
+ProductCode = Literal["FULL_ANALYSIS_UNLOCK", "LEGAL_DRAFT_GENERATION"]
 PaymentMethod = Literal["CARD", "PSE", "TRANSFER", "CASH", "OTHER"]
 
 

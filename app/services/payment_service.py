@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 ADMIN_ROLES = {"admin", "legal_admin"}
 LEGAL_REVIEWER_ROLES = {"legal_reviewer"}
 PRODUCT_CODE = "FULL_ANALYSIS_UNLOCK"
+LEGAL_DRAFT_PRODUCT_CODE = "LEGAL_DRAFT_GENERATION"
 PRODUCT_NAME = "Desbloqueo de analisis completo"
 PRODUCT_DESCRIPTION = "Acceso al analisis completo del expediente Labora."
 LEGACY_PAYWALL_PRODUCT_CODE = "ANALISIS_COMPLETO_HISTORIA_LABORAL"
@@ -120,6 +121,17 @@ class PaymentService:
         ip_address: str | None,
         user_agent: str | None,
     ) -> dict[str, Any]:
+        if product_code == LEGAL_DRAFT_PRODUCT_CODE:
+            from app.services.pension_simulation_service import PensionSimulationService
+
+            return PensionSimulationService(self.db).create_legal_draft_order(
+                case_id,
+                return_url=return_url,
+                cancel_url=cancel_url,
+                user=user,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
         if product_code != PRODUCT_CODE:
             raise ApiError(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1168,6 +1180,19 @@ class PaymentService:
                 user_agent=user_agent,
             )
             return
+        if order.product_code == LEGAL_DRAFT_PRODUCT_CODE:
+            self._approve_legal_draft_payment(
+                case=case,
+                order=order,
+                payment=payment,
+                transaction=transaction,
+                provider_event=provider_event,
+                previous_order=previous_order,
+                previous_payment=previous_payment,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            return
 
         previous_case_status = case.status
         self._move_case_after_payment_approval(
@@ -1362,6 +1387,10 @@ class PaymentService:
             return None, None
         if order.product_code == "PROFESSIONAL_REVIEW":
             return None, self._ensure_receipt(order=order, payment=payment)
+        if order.product_code == LEGAL_DRAFT_PRODUCT_CODE:
+            entitlement = self._unlock_legal_draft_generation(case=case, order=order, payment=payment)
+            receipt = self._ensure_receipt(order=order, payment=payment)
+            return entitlement, receipt
 
         original_case_status = previous_case_status or case.status
         self._move_case_after_payment_approval(case, order=order, payment=payment)
@@ -1394,6 +1423,97 @@ class PaymentService:
         paywall.unlocked_at = paywall.unlocked_at or now
         paywall.unlocked_by_payment_id = payment.id
         paywall.updated_at = now
+
+    def _approve_legal_draft_payment(
+        self,
+        *,
+        case: LaboraCase,
+        order: Order,
+        payment: Payment,
+        transaction: PaymentTransaction,
+        provider_event: ProviderPaymentEvent,
+        previous_order: dict[str, Any],
+        previous_payment: dict[str, Any],
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> None:
+        now = utc_now()
+        entitlement = self._unlock_legal_draft_generation(case=case, order=order, payment=payment)
+        receipt = self._ensure_receipt(order=order, payment=payment)
+        transaction.payment_id = payment.id
+        transaction.order_id = order.id
+        transaction.processed = True
+        transaction.processed_at = now
+        self._record_internal_event(
+            event_name="payment.approved",
+            case_id=case.id,
+            user_id=order.user_id,
+            metadata={
+                "orderId": str(order.id),
+                "paymentId": str(payment.id),
+                "provider": payment.provider,
+                "amount": payment.amount,
+                "currency": payment.currency,
+                "productCode": order.product_code,
+                "entitlementId": str(entitlement.id),
+            },
+        )
+        self._record_internal_event(
+            event_name="legal_draft.entitlement_unlocked",
+            case_id=case.id,
+            user_id=order.user_id,
+            metadata={"orderId": str(order.id), "paymentId": str(payment.id), "receiptId": str(receipt.id)},
+        )
+        self._record_case_history_event_once(
+            case=case,
+            event_type="payment.approved",
+            title="Pago aprobado",
+            description="El proveedor confirmo el pago del borrador juridico.",
+            severity="success",
+            metadata={"orderId": str(order.id), "paymentId": str(payment.id), "productCode": order.product_code},
+        )
+        self._record_case_history_event_once(
+            case=case,
+            event_type="legal_draft.entitlement_unlocked",
+            title="Borrador juridico desbloqueado",
+            description="El expediente quedo listo para seleccionar plantilla juridica.",
+            severity="success",
+            metadata={"entitlementId": str(entitlement.id), "paymentId": str(payment.id)},
+        )
+        self._audit(
+            "pago_desbloqueo.approved",
+            actor=None,
+            case=case,
+            order=order,
+            payment=payment,
+            previous_state={"order": previous_order, "payment": previous_payment},
+            new_state={"order": self._order_state(order), "payment": self._payment_state(payment)},
+            metadata={
+                "providerEventId": provider_event.provider_event_id,
+                "productCode": order.product_code,
+                "entitlement": "legal_draft_generation",
+            },
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+
+    def _unlock_legal_draft_generation(
+        self,
+        *,
+        case: LaboraCase,
+        order: Order,
+        payment: Payment,
+    ):
+        from app.services.pension_simulation_service import grant_entitlement_for_approved_legal_draft_payment
+
+        now = utc_now()
+        self._complete_paywall_unlock(order=order, payment=payment, now=now)
+        entitlement = grant_entitlement_for_approved_legal_draft_payment(
+            self.db,
+            case=case,
+            payment_id=payment.id,
+        )
+        return entitlement
 
     def _move_case_after_payment_approval(
         self,
@@ -1779,7 +1899,7 @@ class PaymentService:
             )
 
     def _require_order_product_can_checkout(self, order: Order) -> None:
-        if order.product_code != PRODUCT_CODE:
+        if order.product_code not in {PRODUCT_CODE, LEGAL_DRAFT_PRODUCT_CODE}:
             raise ApiError(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 code="PRODUCT_NOT_AVAILABLE",

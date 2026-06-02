@@ -16,6 +16,7 @@ from app.api.v1.endpoints import (
     legal_actions,
     paywall,
     payments,
+    pension,
     pre_analysis,
     professional_reviews,
     public,
@@ -138,6 +139,10 @@ api_router.include_router(
 api_router.include_router(
     payments.router,
     tags=["payments"],
+)
+api_router.include_router(
+    pension.router,
+    tags=["pension-simulation"],
 )
 api_router.include_router(
     questionnaires.router,

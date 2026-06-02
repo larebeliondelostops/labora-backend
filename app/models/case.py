@@ -80,12 +80,37 @@ class LaboraCase(Base):
         String(160),
         nullable=True,
     )
+    pension_regime: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="UNKNOWN",
+    )
+    case_goal: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="unknown",
+    )
+    current_situation: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+        default="unknown",
+    )
     situation_type: Mapped[str] = mapped_column(String(80), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_step: Mapped[str] = mapped_column(String(80), nullable=False)
     next_best_action: Mapped[str] = mapped_column(String(80), nullable=False)
     is_sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    has_free_simulation: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+    paid_legal_document_unlocked: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
