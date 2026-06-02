@@ -234,6 +234,7 @@ class LaborPeriodDto(BaseModel):
     status: str
     source_document_id: str | None = Field(alias="sourceDocumentId")
     source_page: int | None = Field(alias="sourcePage")
+    source: dict | None = None
 
 
 class ContributionWeekDto(BaseModel):
@@ -242,6 +243,7 @@ class ContributionWeekDto(BaseModel):
     id: str
     labor_period_id: str | None = Field(alias="laborPeriodId")
     employer_id: str | None = Field(alias="employerId")
+    employer_name: str | None = Field(alias="employerName", default=None)
     year: int
     month: int | None = None
     weeks: float
@@ -257,9 +259,14 @@ class SalaryBaseDto(BaseModel):
     id: str
     labor_period_id: str | None = Field(alias="laborPeriodId")
     employer_id: str | None = Field(alias="employerId")
+    employer_name: str | None = Field(alias="employerName", default=None)
+    year: int
+    month: int | None = None
     period_year: int = Field(alias="periodYear")
     period_month: int | None = Field(alias="periodMonth")
     amount: float
+    original_value: float | None = Field(alias="originalValue", default=None)
+    normalized_value: float | None = Field(alias="normalizedValue", default=None)
     currency: str
     raw_value: str | None = Field(alias="rawValue")
     confidence: float | None = None
@@ -272,6 +279,9 @@ class ContributionGapDto(BaseModel):
     id: str
     start_date: date = Field(alias="startDate")
     end_date: date = Field(alias="endDate")
+    days: int | None = None
+    weeks: float | None = None
+    reason: str | None = None
     gap_type: str = Field(alias="gapType")
     description: str | None = None
     severity: str
@@ -322,9 +332,11 @@ class DocumentReferenceDto(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     document_id: str = Field(alias="documentId")
+    document_name: str | None = Field(alias="documentName", default=None)
     page: int | None = None
+    source_text: str | None = Field(alias="sourceText", default=None)
     bbox: dict | None = None
-    field_id: str = Field(alias="fieldId")
+    field_id: str | None = Field(alias="fieldId", default=None)
 
 
 class ExtractionResponse(BaseModel):

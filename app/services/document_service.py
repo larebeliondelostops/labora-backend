@@ -22,6 +22,7 @@ from app.services.consent_service import ConsentComplianceService
 from app.services.document_audit_service import DocumentAuditService
 from app.services.document_job_queue import DocumentJobQueue
 from app.services.document_storage_service import DocumentStorageService, StorageProviderError
+from app.services.extraction_service import ExtractionService
 from app.utils.dates import utc_now
 
 
@@ -370,6 +371,14 @@ class DocumentService:
             ip_address=ip_address,
             user_agent=user_agent,
         )
+        extraction_job = self._start_labor_history_extraction(
+            document,
+            user=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        if extraction_job is not None:
+            jobs.append(extraction_job)
         self._mark_case_documents_uploaded(case)
         self.db.commit()
         self.db.refresh(document)
@@ -1198,6 +1207,33 @@ class DocumentService:
             "isPrimary": document.is_primary,
             "isDuplicate": document.is_duplicate,
             "sha256Hash": document.sha256_hash,
+        }
+
+    def _start_labor_history_extraction(
+        self,
+        document: Document,
+        *,
+        user: User,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> dict[str, Any] | None:
+        document_type_code = document.document_type.code if document.document_type else None
+        if document_type_code != "historia_laboral" and document.is_primary is not True:
+            return None
+        result = ExtractionService(self.db).start_initial_run_for_document(
+            str(document.id),
+            user=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        if result is None:
+            return None
+        return {
+            "type": "labor_history_extraction",
+            "status": result["status"],
+            "extractionRunId": result["extractionRunId"],
+            "jobId": result["jobId"],
+            "reused": result["reused"],
         }
 
     def _document_not_found(self) -> ApiError:

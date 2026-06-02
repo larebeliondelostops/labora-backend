@@ -39,6 +39,14 @@ class ExtractionRepository:
             .first()
         )
 
+    def list_runs(self, case_id: uuid.UUID) -> list[ExtractionRun]:
+        return (
+            self.db.query(ExtractionRun)
+            .filter(ExtractionRun.case_id == case_id)
+            .order_by(desc(ExtractionRun.created_at))
+            .all()
+        )
+
     def running_run(self, case_id: uuid.UUID) -> ExtractionRun | None:
         return (
             self.db.query(ExtractionRun)
@@ -68,6 +76,14 @@ class ExtractionRepository:
         self.db.add(job)
         self.db.flush()
         return job
+
+    def latest_job_for_run(self, run_id: uuid.UUID) -> ExtractionJob | None:
+        return (
+            self.db.query(ExtractionJob)
+            .filter(ExtractionJob.extraction_run_id == run_id)
+            .order_by(desc(ExtractionJob.created_at))
+            .first()
+        )
 
     def create_field(self, **values: Any) -> ExtractionField:
         field = ExtractionField(**values)

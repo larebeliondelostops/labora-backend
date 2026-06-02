@@ -114,6 +114,17 @@ class ExtractionService:
         case = self._get_case_or_404(case_id)
         self._require_can_view(case, user, ip_address, user_agent)
         run = self.extractions.latest_run(case.id)
+        if run is None:
+            document = self._primary_labor_history_document(case)
+            if document is not None:
+                auto_result = self.start_initial_run_for_document(
+                    str(document.id),
+                    user=user,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                )
+                if auto_result is not None:
+                    run = self.extractions.get_run(auto_result["extractionRunId"])
         self._audit(
             "extraccion_validacion_datos.viewed",
             actor=user,
@@ -162,6 +173,20 @@ class ExtractionService:
                 code="DOCUMENTS_NOT_READY",
                 message="No hay documentos aptos ni respuestas suficientes para iniciar extraccion.",
             )
+
+        existing_run = self._find_reusable_run(
+            case_id=case.id,
+            document_ids=[str(document.id) for document in documents],
+            questionnaire_id=questionnaire_id,
+            reusable_statuses={"in_progress", "completed", "requires_review", "error"},
+        )
+        if existing_run is not None:
+            job = self.extractions.latest_job_for_run(existing_run.id)
+            return {
+                "extractionRunId": str(existing_run.id),
+                "status": existing_run.status,
+                "jobId": str(job.id) if job else "",
+            }
 
         now = utc_now()
         provider = extraction_provider_factory(payload.ai_provider)
@@ -236,6 +261,126 @@ class ExtractionService:
             "extractionRunId": str(run.id),
             "status": run.status,
             "jobId": str(job.id),
+        }
+
+    def start_initial_run_for_document(
+        self,
+        document_id: str,
+        *,
+        user: User,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> dict[str, Any] | None:
+        document = self.documents.get(document_id)
+        if document is None or not self._is_labor_history_document(document):
+            return None
+        case = self._get_case_or_404(document.case_id)
+        self._require_can_start(case, user, ip_address, user_agent)
+        self._require_case_allows_writes(case, user)
+        self._require_sensitive_consent(user)
+        if document.deleted_at is not None or document.status not in READY_DOCUMENT_STATUSES:
+            return None
+
+        document_ids = [str(document.id)]
+        existing_run = self._find_reusable_run(
+            case_id=case.id,
+            document_ids=document_ids,
+            questionnaire_id=None,
+            reusable_statuses={"in_progress", "completed", "requires_review", "error"},
+        )
+        if existing_run is not None:
+            job = self.extractions.latest_job_for_run(existing_run.id)
+            return {
+                "extractionRunId": str(existing_run.id),
+                "status": existing_run.status,
+                "jobId": str(job.id) if job else None,
+                "reused": True,
+            }
+
+        running_run = self.extractions.running_run(case.id)
+        if running_run is not None:
+            job = self.extractions.latest_job_for_run(running_run.id)
+            return {
+                "extractionRunId": str(running_run.id),
+                "status": running_run.status,
+                "jobId": str(job.id) if job else None,
+                "reused": True,
+            }
+
+        now = utc_now()
+        provider = extraction_provider_factory(settings.ai_extraction_provider)
+        run = self.extractions.create_run(
+            case_id=case.id,
+            status="in_progress",
+            confirmation_status="draft",
+            source="manual" if provider.provider_name == "none" else "mixed",
+            ai_provider=provider.provider_name,
+            ai_model=provider.model,
+            document_ids=document_ids,
+            questionnaire_response_id=None,
+            low_confidence_count=0,
+            issues_count=0,
+            started_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        job = self.extractions.create_job(
+            case_id=case.id,
+            extraction_run_id=run.id,
+            job_type=_job_type_for_mode("initial"),
+            status="queued",
+            progress=Decimal("0.00"),
+            logs=[],
+            retry_count=0,
+            max_retries=settings.extraction_job_max_retries,
+            idempotency_key=self._idempotency_key(
+                case_id=case.id,
+                document_ids=run.document_ids,
+                questionnaire_id=None,
+                mode="initial",
+            ),
+            created_at=now,
+            updated_at=now,
+        )
+        self._audit(
+            "extraction.run.started",
+            actor=user,
+            case=case,
+            entity_type="extraction_run",
+            entity_id=run.id,
+            new_state=self._run_state(run),
+            metadata={"jobId": str(job.id), "mode": "initial", "trigger": "document_upload"},
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        self._record_history_event(
+            case=case,
+            event_type="extraccion_validacion_datos.created",
+            title="Extraccion iniciada",
+            description="Se inicio la extraccion automatica desde la historia laboral cargada.",
+            severity="info",
+            actor=user,
+            metadata={"extractionRunId": str(run.id), "jobId": str(job.id), "documentId": str(document.id)},
+        )
+        try:
+            self._run_job(
+                case=case,
+                run=run,
+                job=job,
+                documents=[document],
+                questionnaire_id=None,
+                provider_name=settings.ai_extraction_provider,
+                actor=user,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+        except ApiError:
+            pass
+        return {
+            "extractionRunId": str(run.id),
+            "status": run.status,
+            "jobId": str(job.id),
+            "reused": False,
         }
 
     def update_fields(
@@ -1302,11 +1447,6 @@ class ExtractionService:
 
     def _blocking_reasons(self, case_id: uuid.UUID) -> list[str]:
         reasons: list[str] = []
-        low_count = len(self._low_confidence_fields(case_id))
-        if low_count:
-            reasons.append(
-                f"Hay {low_count} campos de baja confianza pendientes por revisar."
-            )
         high_issues = [
             issue
             for issue in self.extractions.list_issues(case_id)
@@ -1352,9 +1492,14 @@ class ExtractionService:
         issues = self.extractions.list_issues(case.id)
         blocking_reasons = self._blocking_reasons(case.id)
         status_value = run.status if run else "not_started"
+        if status_value == "in_progress":
+            blocking_reasons = ["La extraccion documental sigue en proceso.", *blocking_reasons]
+        if status_value == "error" and run and run.error_message:
+            blocking_reasons = [run.error_message, *blocking_reasons]
         confirmation_status = run.confirmation_status if run else "draft"
         can_confirm = (
             run is not None
+            and run.status in {"completed", "requires_review"}
             and not blocking_reasons
             and run.confirmation_status
             not in {"user_confirmed", "confirmed_with_pending_fields", "admin_approved"}
@@ -1362,8 +1507,8 @@ class ExtractionService:
         )
         employers_payload = [self._employer_response(item) for item in employers]
         periods_payload = [self._labor_period_response(item, employer_by_id) for item in periods]
-        contribution_weeks_payload = [self._contribution_week_response(item) for item in contribution_weeks]
-        salary_bases_payload = [self._salary_base_response(item) for item in salary_bases]
+        contribution_weeks_payload = [self._contribution_week_response(item, employer_by_id) for item in contribution_weeks]
+        salary_bases_payload = [self._salary_base_response(item, employer_by_id) for item in salary_bases]
         gaps_payload = [self._gap_response(item) for item in gaps]
         novelties_payload = [self._novelty_response(item) for item in novelties]
         return {
@@ -1395,12 +1540,13 @@ class ExtractionService:
                 "gaps": gaps_payload,
             },
             "documentReferences": [
-                {
-                    "documentId": str(field.source_document_id),
-                    "page": field.source_page,
-                    "bbox": field.source_bbox,
-                    "fieldId": str(field.id),
-                }
+                self._document_reference(
+                    field.source_document_id,
+                    page=field.source_page,
+                    bbox=field.source_bbox,
+                    field_id=field.id,
+                    source_text=field.source_text,
+                )
                 for field in fields
                 if field.source_document_id is not None
             ],
@@ -1411,6 +1557,60 @@ class ExtractionService:
             },
             "canConfirm": can_confirm,
             "blockingReasons": blocking_reasons,
+        }
+
+    def _find_reusable_run(
+        self,
+        *,
+        case_id: uuid.UUID,
+        document_ids: list[str],
+        questionnaire_id: uuid.UUID | None,
+        reusable_statuses: set[str],
+    ) -> ExtractionRun | None:
+        wanted_document_ids = set(document_ids)
+        for run in self.extractions.list_runs(case_id):
+            if run.status not in reusable_statuses:
+                continue
+            if set(run.document_ids or []) != wanted_document_ids:
+                continue
+            if run.questionnaire_response_id != questionnaire_id:
+                continue
+            return run
+        return None
+
+    def _primary_labor_history_document(self, case: LaboraCase) -> Document | None:
+        documents = [
+            document
+            for document in self.documents.list_active_case_documents(case.id)
+            if self._is_labor_history_document(document)
+            and document.status in READY_DOCUMENT_STATUSES
+        ]
+        primary = [document for document in documents if document.is_primary]
+        return (primary or documents)[0] if documents else None
+
+    def _is_labor_history_document(self, document: Document) -> bool:
+        document_type_code = document.document_type.code if document.document_type else None
+        return document_type_code == "historia_laboral" or document.is_primary is True
+
+    def _document_reference(
+        self,
+        document_id: uuid.UUID | None,
+        *,
+        page: int | None,
+        bbox: dict | None = None,
+        field_id: uuid.UUID | None = None,
+        source_text: str | None = None,
+    ) -> dict[str, Any] | None:
+        if document_id is None:
+            return None
+        document = self.documents.get(document_id)
+        return {
+            "documentId": str(document_id),
+            "documentName": document.display_name or document.original_filename if document else None,
+            "page": page,
+            "sourceText": source_text,
+            "fieldId": str(field_id) if field_id else None,
+            "bbox": bbox,
         }
 
     def _require_sensitive_consent(self, user: User) -> None:
@@ -1800,6 +2000,7 @@ class ExtractionService:
         employers_by_id: dict[str, Employer],
     ) -> dict[str, Any]:
         employer = employers_by_id.get(str(period.employer_id)) if period.employer_id else None
+        source = self._document_reference(period.source_document_id, page=period.source_page)
         return {
             "id": str(period.id),
             "employerId": str(period.employer_id) if period.employer_id else None,
@@ -1816,13 +2017,16 @@ class ExtractionService:
             "status": period.status,
             "sourceDocumentId": str(period.source_document_id) if period.source_document_id else None,
             "sourcePage": period.source_page,
+            "source": source,
         }
 
-    def _contribution_week_response(self, item: ContributionWeek) -> dict[str, Any]:
+    def _contribution_week_response(self, item: ContributionWeek, employers_by_id: dict[str, Employer]) -> dict[str, Any]:
+        employer = employers_by_id.get(str(item.employer_id)) if item.employer_id else None
         return {
             "id": str(item.id),
             "laborPeriodId": str(item.labor_period_id) if item.labor_period_id else None,
             "employerId": str(item.employer_id) if item.employer_id else None,
+            "employerName": employer.name if employer else None,
             "year": item.year,
             "month": item.month,
             "weeks": float(item.weeks),
@@ -1832,14 +2036,20 @@ class ExtractionService:
             "status": item.status,
         }
 
-    def _salary_base_response(self, item: SalaryBase) -> dict[str, Any]:
+    def _salary_base_response(self, item: SalaryBase, employers_by_id: dict[str, Employer]) -> dict[str, Any]:
+        employer = employers_by_id.get(str(item.employer_id)) if item.employer_id else None
         return {
             "id": str(item.id),
             "laborPeriodId": str(item.labor_period_id) if item.labor_period_id else None,
             "employerId": str(item.employer_id) if item.employer_id else None,
+            "employerName": employer.name if employer else None,
+            "year": item.period_year,
+            "month": item.period_month,
             "periodYear": item.period_year,
             "periodMonth": item.period_month,
             "amount": float(item.amount),
+            "originalValue": float(item.amount),
+            "normalizedValue": float(item.amount),
             "currency": item.currency,
             "rawValue": item.raw_value,
             "confidence": float(item.confidence) if item.confidence is not None else None,
@@ -1851,6 +2061,9 @@ class ExtractionService:
             "id": str(item.id),
             "startDate": item.start_date,
             "endDate": item.end_date,
+            "days": (item.end_date - item.start_date).days + 1 if item.start_date and item.end_date else None,
+            "weeks": round(((item.end_date - item.start_date).days + 1) / 7, 2) if item.start_date and item.end_date else None,
+            "reason": item.description,
             "gapType": item.gap_type,
             "description": item.description,
             "severity": item.severity,

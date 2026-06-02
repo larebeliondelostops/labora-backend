@@ -34,6 +34,21 @@ from app.models.document import (
     DocumentValidation,
     FileUpload,
 )
+from app.models.extraction import (
+    ContributionGap,
+    ContributionWeek,
+    Employer,
+    ExtractionAuditEvent,
+    ExtractionConfirmation,
+    ExtractionField,
+    ExtractionIssue,
+    ExtractionJob,
+    ExtractionRun,
+    LaborNovelty,
+    LaborPeriod,
+    SalaryBase,
+    UserCorrection,
+)
 from app.models.user import User
 from app.services.consent_service import (
     REQUIRED_CONSENT_TYPES,
@@ -64,6 +79,19 @@ TABLES = [
     FileUpload.__table__,
     DocumentHash.__table__,
     DocumentValidation.__table__,
+    ExtractionRun.__table__,
+    Employer.__table__,
+    LaborPeriod.__table__,
+    ExtractionField.__table__,
+    ContributionWeek.__table__,
+    SalaryBase.__table__,
+    ContributionGap.__table__,
+    LaborNovelty.__table__,
+    UserCorrection.__table__,
+    ExtractionConfirmation.__table__,
+    ExtractionIssue.__table__,
+    ExtractionAuditEvent.__table__,
+    ExtractionJob.__table__,
 ]
 
 TITLES = {
@@ -542,7 +570,23 @@ def test_complete_upload_reads_private_minio_object(client_and_session, monkeypa
     assert {job["type"] for job in completed.json()["jobs"]} == {
         "document_validation",
         "document_classification",
+        "labor_history_extraction",
     }
+    extraction_job = next(job for job in completed.json()["jobs"] if job["type"] == "labor_history_extraction")
+    assert extraction_job["status"] in {"completed", "requires_review"}
+
+    extraction = client.get(f"/api/v1/cases/{case_id}/extraction", headers=headers)
+    assert extraction.status_code == 200
+    extraction_data = extraction.json()
+    assert extraction_data["status"] in {"completed", "requires_review"}
+    assert extraction_data["confirmationStatus"] == "ai_extracted"
+    assert extraction_data["summary"]["employersCount"] == 1
+    assert extraction_data["summary"]["laborPeriodsCount"] == 1
+    assert extraction_data["summary"]["contributionWeeksTotal"] == 52
+    assert extraction_data["employers"][0]["id"]
+    assert extraction_data["employers"][0]["name"]
+    assert extraction_data["laborPeriods"][0]["source"]["documentId"] == document_id
+    assert extraction_data["documentReferences"][0]["sourceText"]
 
 
 def test_view_url_uses_minio_public_presigned_get_url(client_and_session, monkeypatch) -> None:
