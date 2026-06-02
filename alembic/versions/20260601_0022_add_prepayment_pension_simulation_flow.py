@@ -333,10 +333,12 @@ def _seed_document_types() -> None:
                     is_primary_candidate, allowed_mime_types, max_size_mb, sort_order,
                     active, created_at, updated_at
                 )
-                SELECT :id, :code, :name, :description, :category, :required,
-                       :primary, :allowed_mime_types, :max_size_mb, :sort_order,
-                       true, :created_at, :updated_at
-                WHERE NOT EXISTS (SELECT 1 FROM document_types WHERE code = :code)
+                VALUES (
+                    :id, :code, :name, :description, :category, :required,
+                    :primary, :allowed_mime_types, :max_size_mb, :sort_order,
+                    true, :created_at, :updated_at
+                )
+                ON CONFLICT (code) DO NOTHING
                 """
             ).bindparams(sa.bindparam("allowed_mime_types", type_=sa.JSON())),
             {
@@ -367,11 +369,11 @@ def _seed_template_catalog() -> None:
                     id, template_key, name, description, regime, process_type,
                     storage_path, active, requires_professional_review, created_at
                 )
-                SELECT :id, :template_key, :name, :description, :regime, :process_type,
-                       :storage_path, true, true, :created_at
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM legal_template_catalog WHERE template_key = :template_key
+                VALUES (
+                    :id, :template_key, :name, :description, :regime, :process_type,
+                    :storage_path, true, true, :created_at
                 )
+                ON CONFLICT (template_key) DO NOTHING
                 """
             ),
             {
